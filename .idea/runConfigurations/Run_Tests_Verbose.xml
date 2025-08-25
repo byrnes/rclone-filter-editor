@@ -1,0 +1,13 @@
+<component name="ProjectRunConfigurationManager">
+  <configuration default="false" name="Run Tests Verbose" type="GoTestRunConfiguration" factoryName="Go Test">
+    <module name="rclone-filter-editor" />
+    <working_directory value="$PROJECT_DIR$" />
+    <go_parameters value="-v" />
+    <kind value="PACKAGE" />
+    <package value="rclone-filter-editor" />
+    <directory value="$PROJECT_DIR$" />
+    <filePath value="$PROJECT_DIR$" />
+    <framework value="gotest" />
+    <method v="2" />
+  </configuration>
+</component>
