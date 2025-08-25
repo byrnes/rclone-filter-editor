@@ -216,22 +216,6 @@ func main() {
 
 }
 
-func buildFileTree(rootPath string, filterRules []FilterRule) *FileNode {
-	absPath, _ := filepath.Abs(rootPath)
-	root := &FileNode{
-		Name:     filepath.Base(absPath),
-		Path:     absPath,
-		IsDir:    true,
-		Expanded: true,
-	}
-
-	rootFilterPath := getFilterPath(absPath)
-	root.Filter = getEffectiveFilter(rootFilterPath, filterRules)
-
-	buildTreeRecursive(root, filterRules)
-	return root
-}
-
 func (m *Model) buildFileTreeAsync(rootPath string) {
 	// Start background goroutine for breadth-first concurrent tree building
 	go func() {
@@ -426,53 +410,6 @@ func (m *Model) scanSingleDirectory(node *FileNode, filterRules []FilterRule) []
 	node.mu.Unlock()
 
 	return childDirectories
-}
-
-func buildTreeRecursive(node *FileNode, filterRules []FilterRule) {
-	// This function is kept for compatibility but not used in async version
-	if !node.IsDir {
-		return
-	}
-
-	entries, err := os.ReadDir(node.Path)
-	if err != nil {
-		return
-	}
-
-	for _, entry := range entries {
-		childPath := filepath.Join(node.Path, entry.Name())
-
-		// Get file info to capture size and modification time
-		var modTime time.Time
-		var size int64
-		if info, err := entry.Info(); err == nil {
-			modTime = info.ModTime()
-			if !entry.IsDir() {
-				size = info.Size()
-			}
-		}
-
-		child := &FileNode{
-			Name:    entry.Name(),
-			Path:    childPath,
-			IsDir:   entry.IsDir(),
-			Size:    size,
-			ModTime: modTime,
-			Parent:  node,
-		}
-
-		childFilterPath := getFilterPath(childPath)
-		child.Filter = getEffectiveFilter(childFilterPath, filterRules)
-
-		node.Children = append(node.Children, child)
-
-		if child.IsDir {
-			buildTreeRecursive(child, filterRules)
-		}
-	}
-
-	// This function is kept for compatibility but not used in async version
-	// Sort would be handled by the caller if needed
 }
 
 func (m *Model) sortChildren(children []*FileNode) {
@@ -794,10 +731,9 @@ func (m *Model) invertSelection() {
 	}
 
 	// Update children of all changed directories
-	// TODO: Re-enable after debugging
-	// for _, dir := range changedDirs {
-	// 	m.updateChildrenFilters(dir)
-	// }
+	for _, dir := range changedDirs {
+		m.updateChildrenFilters(dir)
+	}
 }
 
 func (m *Model) resetFilters() {
@@ -901,19 +837,6 @@ func (m *Model) getEffectiveFilterWithMap(path string) FilterState {
 	}
 
 	return FilterNone
-}
-
-// buildUpdatedFilterRules creates a new filter rules list that includes
-// both the original rules and any new rules from the filterMap
-func (m *Model) buildUpdatedFilterRules() []FilterRule {
-	// Temporarily disabled to debug key issue
-	return m.filterRules
-}
-
-// updateNodeFiltersRecursive recursively updates filter status for a node and all its children
-func (m *Model) updateNodeFiltersRecursive(node *FileNode, filterRules []FilterRule) {
-	// Temporarily disabled to debug key issue
-	return
 }
 
 func (m Model) View() string {
