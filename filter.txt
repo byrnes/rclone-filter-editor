@@ -1,0 +1,14 @@
+# Example rclone filter file
+# This file demonstrates how to use include/exclude patterns
+
+# Exclude specific subdirectories
+- dir1/sub1/**
+- dir1/sub2/**
+
+# Include entire directories
++ dir1/**
++ dir2/**
++ dir3/**
+
+# Exclude everything else by default
+- *

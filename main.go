@@ -47,6 +47,8 @@ type treeReadyMsg struct {
 
 type refreshMsg struct{}
 
+type refreshDirMsg struct{}
+
 type FileNode struct {
 	Name     string
 	Path     string
@@ -116,10 +118,10 @@ func main() {
 		flag.PrintDefaults()
 		fmt.Fprintf(os.Stderr, "\nExamples:\n")
 		fmt.Fprintf(os.Stderr, "  %s                           # Use filter.txt in current directory (4 threads)\n", os.Args[0])
-		fmt.Fprintf(os.Stderr, "  %s test_dir                  # Browse test_dir with default filter.txt\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  %s test/folder_a             # Browse test/folder_a with default filter.txt\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "  %s myfilters.txt             # Use myfilters.txt in current directory\n", os.Args[0])
-		fmt.Fprintf(os.Stderr, "  %s myfilters.txt test_dir    # Use myfilters.txt to browse test_dir\n", os.Args[0])
-		fmt.Fprintf(os.Stderr, "  %s --checkers 8 -p test_dir  # Use 8 threads to scan test_dir\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  %s myfilters.txt test/folder_a # Use myfilters.txt to browse test/folder_a\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  %s --checkers 8 -p test/folder_a # Use 8 threads to scan test/folder_a\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "  %s -f filters.txt -p /path   # Use specific filter file and path\n", os.Args[0])
 	}
 
@@ -241,6 +243,49 @@ func (m *Model) buildFileTreeAsync(rootPath string) {
 	}()
 }
 
+func (m *Model) refreshDirectory() {
+	if m.root == nil {
+		return
+	}
+
+	// Cancel any existing operations
+	m.cancel()
+
+	// Create new context for refresh operation
+	ctx, cancel := context.WithCancel(context.Background())
+	m.ctx = ctx
+	m.cancel = cancel
+
+	// Reset loading state
+	m.loading = true
+	m.loadProgress = "Refreshing directory tree..."
+	atomic.StoreInt64(&m.scannedDirs, 0)
+	atomic.StoreInt64(&m.scannedFiles, 0)
+
+	// Create new root node with same path and preserve filter state
+	rootPath := m.root.Path
+	m.root = &FileNode{
+		Name:     filepath.Base(rootPath),
+		Path:     rootPath,
+		IsDir:    true,
+		Expanded: true,
+		Loading:  true,
+	}
+	// Use the new function that considers both filterRules and filterMap
+	rootFilterPath := getFilterPath(rootPath)
+	m.root.Filter = m.getEffectiveFilterWithMap(rootFilterPath)
+	m.updateVisibleNodes()
+
+	// Start async tree building
+	go func() {
+		m.buildTreeBreadthFirst(m.root, m.filterRules)
+		// Send completion message
+		if m.program != nil {
+			m.program.Send(treeReadyMsg{root: m.root})
+		}
+	}()
+}
+
 // Breadth-first concurrent directory scanning
 func (m *Model) buildTreeBreadthFirst(root *FileNode, filterRules []FilterRule) {
 	// Use a queue for breadth-first traversal
@@ -337,7 +382,7 @@ func (m *Model) scanSingleDirectory(node *FileNode, filterRules []FilterRule) []
 		}
 
 		childFilterPath := getFilterPath(childPath)
-		child.Filter = getEffectiveFilter(childFilterPath, filterRules)
+		child.Filter = m.getEffectiveFilterWithMap(childFilterPath)
 
 		if !entry.IsDir() {
 			files := atomic.AddInt64(&m.scannedFiles, 1)
@@ -362,6 +407,22 @@ func (m *Model) scanSingleDirectory(node *FileNode, filterRules []FilterRule) []
 	node.mu.Lock()
 	node.Children = children
 	node.Loading = false
+
+	// Calculate stats for this directory now that children are loaded
+	var totalSize int64
+	var totalFiles int
+	for _, child := range children {
+		if child.IsDir {
+			totalSize += child.TotalSize
+			totalFiles += child.TotalFiles
+		} else {
+			totalSize += child.Size
+			totalFiles++
+		}
+	}
+	node.TotalSize = totalSize
+	node.TotalFiles = totalFiles
+
 	node.mu.Unlock()
 
 	return childDirectories
@@ -519,6 +580,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case refreshDirMsg:
+		m.refreshDirectory()
+		return m, tea.Tick(50*time.Millisecond, func(t time.Time) tea.Msg {
+			return refreshMsg{}
+		})
+
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
@@ -619,9 +686,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					filterPath = strings.TrimSuffix(filterPath, "/") + "/**"
 				}
 
+				// Normalize pattern to match original filter file format (without leading slash)
+				filterPath = strings.TrimPrefix(filterPath, "/")
+
 				m.filterMap[filterPath] = node.Filter
 				if node.Filter == FilterNone {
 					delete(m.filterMap, filterPath)
+				}
+
+				// Update children's filter status if this is a directory
+				if node.IsDir {
+					m.updateChildrenFilters(node)
 				}
 			}
 			return m, nil
@@ -665,6 +740,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.updateVisibleNodes()
 			}
 			return m, nil
+
+		case "f5", "ctrl+r":
+			return m, func() tea.Msg {
+				return refreshDirMsg{}
+			}
 		}
 	}
 
@@ -685,6 +765,9 @@ func (m *Model) adjustScroll() {
 }
 
 func (m *Model) invertSelection() {
+	// Collect directories that changed so we can update their children
+	var changedDirs []*FileNode
+
 	for _, node := range m.visibleNodes {
 		switch node.Filter {
 		case FilterNone:
@@ -700,6 +783,7 @@ func (m *Model) invertSelection() {
 		if node.IsDir {
 			// For directories, use /** to exclude the directory and all its contents
 			filterPath = strings.TrimSuffix(filterPath, "/") + "/**"
+			changedDirs = append(changedDirs, node)
 		}
 
 		if node.Filter == FilterNone {
@@ -708,6 +792,12 @@ func (m *Model) invertSelection() {
 			m.filterMap[filterPath] = node.Filter
 		}
 	}
+
+	// Update children of all changed directories
+	// TODO: Re-enable after debugging
+	// for _, dir := range changedDirs {
+	// 	m.updateChildrenFilters(dir)
+	// }
 }
 
 func (m *Model) resetFilters() {
@@ -715,6 +805,115 @@ func (m *Model) resetFilters() {
 		node.Filter = FilterNone
 	}
 	m.filterMap = make(map[string]FilterState)
+}
+
+// updateChildrenFilters recursively updates the filter status of all children
+// based on the current filter rules including any new changes
+func (m *Model) updateChildrenFilters(parent *FileNode) {
+	if parent == nil || !parent.IsDir {
+		return
+	}
+
+	// Simple approach: just update all children recursively with getEffectiveFilter
+	m.updateChildrenRecursive(parent)
+}
+
+// updateChildrenRecursive updates filter status for all children
+func (m *Model) updateChildrenRecursive(node *FileNode) {
+	if node == nil || !node.IsDir {
+		return
+	}
+
+	// Update all direct children
+	node.mu.RLock()
+	children := node.Children
+	node.mu.RUnlock()
+
+	for _, child := range children {
+		// Update child's filter based on current filterMap and rules
+		childFilterPath := getFilterPath(child.Path)
+		child.Filter = m.getEffectiveFilterWithMap(childFilterPath)
+
+		// If this child is a directory, update its children too
+		if child.IsDir {
+			m.updateChildrenRecursive(child)
+		}
+	}
+}
+
+// reapplyFiltersToTree recursively re-applies filters to all nodes in the tree
+func (m *Model) reapplyFiltersToTree(node *FileNode) {
+	if node == nil {
+		return
+	}
+
+	// Update the current node's filter status
+	filterPath := getFilterPath(node.Path)
+	node.Filter = m.getEffectiveFilterWithMap(filterPath)
+
+	// If this is a directory, recurse to all children
+	if node.IsDir {
+		node.mu.RLock()
+		children := node.Children
+		node.mu.RUnlock()
+
+		for _, child := range children {
+			m.reapplyFiltersToTree(child)
+		}
+	}
+}
+
+// getEffectiveFilterWithMap determines the effective filter state for a path
+// considering both the original filterRules and the current filterMap changes
+func (m *Model) getEffectiveFilterWithMap(path string) FilterState {
+	// FIXED: Check for more specific patterns in filterMap FIRST
+	// This ensures user's new patterns override existing ones correctly
+
+	var bestMatch string
+	var bestState FilterState = FilterNone
+	var foundMatch bool
+
+	// First, check all patterns in filterMap (including new user patterns)
+	for pattern, state := range m.filterMap {
+		if pattern == path || matchesRclonePattern(pattern, path) {
+			// If this is a more specific match, use it
+			if !foundMatch || len(pattern) > len(bestMatch) {
+				bestMatch = pattern
+				bestState = state
+				foundMatch = true
+			}
+		}
+	}
+
+	// If we found a match in filterMap, return it
+	if foundMatch {
+		return bestState
+	}
+
+	// Fallback: check original rules for patterns not in filterMap
+	for _, rule := range m.filterRules {
+		if rule.Pattern == path || matchesRclonePattern(rule.Pattern, path) {
+			// Only use this if it's not already handled by filterMap
+			if _, exists := m.filterMap[rule.Pattern]; !exists {
+				return rule.State
+			}
+		}
+	}
+
+	return FilterNone
+}
+
+// buildUpdatedFilterRules creates a new filter rules list that includes
+// both the original rules and any new rules from the filterMap
+func (m *Model) buildUpdatedFilterRules() []FilterRule {
+	// Temporarily disabled to debug key issue
+	return m.filterRules
+}
+
+// updateNodeFiltersRecursive recursively updates filter status for a node and all its children
+func (m *Model) updateNodeFiltersRecursive(node *FileNode, filterRules []FilterRule) {
+	// Temporarily disabled to debug key issue
+	return
 }
 
 func (m Model) View() string {
@@ -851,6 +1050,7 @@ Sorting:
 Other:
   ? or h      Show this help
   s           Save filters to file
+  F5/Ctrl+R   Refresh directory tree
   q           Quit (asks to save)
   Ctrl+C      Quit immediately without saving
 
@@ -944,6 +1144,9 @@ func getFilterPath(path string) string {
 	if rootPath == "" {
 		wd, _ := os.Getwd()
 		rootPath = wd
+	} else {
+		// Ensure rootPath is also absolute for proper comparison
+		rootPath, _ = filepath.Abs(rootPath)
 	}
 
 	rel, err := filepath.Rel(rootPath, absPath)
@@ -964,7 +1167,24 @@ func matchesRclonePattern(pattern, path string) bool {
 	cleanPattern := strings.TrimPrefix(pattern, "/")
 	cleanPath := strings.TrimPrefix(path, "/")
 
-	// Convert rclone pattern to regex
+	// Special handling for /** patterns - they should match the directory itself
+	// In rclone, "TV/**" matches both "TV" (the directory) and "TV/anything" (contents)
+	if strings.HasSuffix(cleanPattern, "/**") {
+		// Extract the directory part (everything before /**)
+		dirPattern := strings.TrimSuffix(cleanPattern, "/**")
+
+		// Check if the path exactly matches the directory
+		if cleanPath == dirPattern {
+			return true
+		}
+
+		// Check if the path is inside the directory (starts with dirPattern/)
+		if strings.HasPrefix(cleanPath, dirPattern+"/") {
+			return true
+		}
+	}
+
+	// Convert rclone pattern to regex for other patterns
 	regex := rclonePatternToRegex(cleanPattern)
 
 	// Compile and match regex
@@ -1081,36 +1301,8 @@ func getEffectiveFilter(path string, filterRules []FilterRule) FilterState {
 		}
 	}
 
-	// UI Enhancement: If no direct match was found, check if there's an include
-	// pattern that would include the contents of this directory (pattern/**).
-	// This helps the UI show directories as included when their contents are included.
-	if matchedState != FilterInclude {
-		// Check if there's an include pattern for everything under this directory
-		cleanPath := strings.TrimPrefix(path, "/")
-		contentPattern := cleanPath + "/**"
-
-		for _, rule := range filterRules {
-			if rule.Pattern == contentPattern && rule.State == FilterInclude {
-				// Found a pattern that includes contents of this directory
-				// Show the directory as included for better UX
-				return FilterInclude
-			}
-		}
-	}
-
-	// UI Enhancement: If this is a directory and we found an include,
-	// check if there's a corresponding /** exclusion pattern that would
-	// exclude all its contents. If so, show it as excluded for better UX.
-	if matchedState == FilterInclude {
-		// Check if there's an exclusion pattern for everything under this directory
-		contentPattern := strings.TrimPrefix(path, "/") + "/**"
-		for _, rule := range filterRules {
-			if rule.Pattern == contentPattern && rule.State == FilterExclude {
-				return FilterExclude
-			}
-		}
-	}
-
+	// The pattern matching logic now handles /** patterns correctly,
+	// so we don't need the UI enhancement anymore - just return the matched state
 	return matchedState
 }
 

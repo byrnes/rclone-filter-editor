@@ -449,30 +449,28 @@ func TestSaveFilterFileWithPatterns(t *testing.T) {
 }
 
 func TestRootPathDisplayWithExcludeAll(t *testing.T) {
-	// Create a temporary directory structure similar to test_dir
+	// Create a temporary directory structure similar to test/folder_a
 	tempDir := "test_base_path"
 	defer os.RemoveAll(tempDir)
 
 	os.MkdirAll(tempDir, 0755)
-	os.MkdirAll(filepath.Join(tempDir, "TV"), 0755)
-	os.MkdirAll(filepath.Join(tempDir, "music"), 0755)
-	os.MkdirAll(filepath.Join(tempDir, "movies"), 0755)
+	os.MkdirAll(filepath.Join(tempDir, "dir1"), 0755)
+	os.MkdirAll(filepath.Join(tempDir, "dir2"), 0755)
+	os.MkdirAll(filepath.Join(tempDir, "dir3"), 0755)
 
-	// Create filter rules that match your filter.txt:
-	// - TV/Pretty Little Liars/**
-	// - TV/The Mentalist/**
-	// - TV/Lost/**
-	// + TV/**
-	// + music/**
-	// + movies/**
+	// Create filter rules for test:
+	// - dir1/sub1/**
+	// - dir1/sub2/**
+	// + dir1/**
+	// + dir2/**
+	// + dir3/**
 	// - *
 	filterRules := []FilterRule{
-		{Pattern: "TV/Pretty Little Liars/**", State: FilterExclude},
-		{Pattern: "TV/The Mentalist/**", State: FilterExclude},
-		{Pattern: "TV/Lost/**", State: FilterExclude},
-		{Pattern: "TV/**", State: FilterInclude},
-		{Pattern: "music/**", State: FilterInclude},
-		{Pattern: "movies/**", State: FilterInclude},
+		{Pattern: "dir1/sub1/**", State: FilterExclude},
+		{Pattern: "dir1/sub2/**", State: FilterExclude},
+		{Pattern: "dir1/**", State: FilterInclude},
+		{Pattern: "dir2/**", State: FilterInclude},
+		{Pattern: "dir3/**", State: FilterInclude},
 		{Pattern: "*", State: FilterExclude},
 	}
 
@@ -491,25 +489,25 @@ func TestRootPathDisplayWithExcludeAll(t *testing.T) {
 	t.Logf("Root filter state: %d", rootFilter)
 
 	// Test subdirectory paths
-	tvPath := filepath.Join(absPath, "TV")
-	tvFilterPath := getFilterPath(tvPath)
-	tvFilter := getEffectiveFilter(tvFilterPath, filterRules)
+	dir1Path := filepath.Join(absPath, "dir1")
+	dir1FilterPath := getFilterPath(dir1Path)
+	dir1Filter := getEffectiveFilter(dir1FilterPath, filterRules)
 
-	t.Logf("TV path: %s", tvPath)
-	t.Logf("TV filter path: %s", tvFilterPath)
-	t.Logf("TV filter state: %d", tvFilter)
+	t.Logf("dir1 path: %s", dir1Path)
+	t.Logf("dir1 filter path: %s", dir1FilterPath)
+	t.Logf("dir1 filter state: %d", dir1Filter)
 
-	musicPath := filepath.Join(absPath, "music")
-	musicFilterPath := getFilterPath(musicPath)
-	musicFilter := getEffectiveFilter(musicFilterPath, filterRules)
+	dir2Path := filepath.Join(absPath, "dir2")
+	dir2FilterPath := getFilterPath(dir2Path)
+	dir2Filter := getEffectiveFilter(dir2FilterPath, filterRules)
 
-	t.Logf("music path: %s", musicPath)
-	t.Logf("music filter path: %s", musicFilterPath)
-	t.Logf("music filter state: %d", musicFilter)
+	t.Logf("dir2 path: %s", dir2Path)
+	t.Logf("dir2 filter path: %s", dir2FilterPath)
+	t.Logf("dir2 filter state: %d", dir2Filter)
 
 	// Based on the filter rules and expected UI behavior:
 	// 1. The root directory should be excluded by the "- *" rule (it matches the pattern)
-	// 2. The subdirectories TV, music, movies should be included due to patterns like "TV/**"
+	// 2. The subdirectories dir1, dir2, dir3 should be included due to patterns like "dir1/**"
 	// 3. "- *" should exclude everything at the base level, including the base directory
 
 	// The root directory with filter path "/." should match the "- *" pattern and be excluded
@@ -517,12 +515,12 @@ func TestRootPathDisplayWithExcludeAll(t *testing.T) {
 		t.Errorf("Root directory should be excluded by '- *' rule (FilterExclude=%d), got %d", FilterExclude, rootFilter)
 	}
 
-	if tvFilter != FilterInclude {
-		t.Errorf("TV directory should be included (FilterInclude=%d), got %d", FilterInclude, tvFilter)
+	if dir1Filter != FilterInclude {
+		t.Errorf("dir1 directory should be included (FilterInclude=%d), got %d", FilterInclude, dir1Filter)
 	}
 
-	if musicFilter != FilterInclude {
-		t.Errorf("music directory should be included (FilterInclude=%d), got %d", FilterInclude, musicFilter)
+	if dir2Filter != FilterInclude {
+		t.Errorf("dir2 directory should be included (FilterInclude=%d), got %d", FilterInclude, dir2Filter)
 	}
 }
 
@@ -530,14 +528,13 @@ func TestFilterRuleOrdering(t *testing.T) {
 	tempFile := "test_ordering.txt"
 	defer os.Remove(tempFile)
 
-	// Create initial filter rules similar to the user's filter.txt
+	// Create initial filter rules for testing
 	originalRules := []FilterRule{
-		{Pattern: "TV/Pretty Little Liars/**", State: FilterExclude},
-		{Pattern: "TV/The Mentalist/**", State: FilterExclude},
-		{Pattern: "TV/Lost/**", State: FilterExclude},
-		{Pattern: "TV/**", State: FilterInclude},
-		{Pattern: "music/**", State: FilterInclude},
-		{Pattern: "movies/**", State: FilterInclude},
+		{Pattern: "dir1/sub1/**", State: FilterExclude},
+		{Pattern: "dir1/sub2/**", State: FilterExclude},
+		{Pattern: "dir1/**", State: FilterInclude},
+		{Pattern: "dir2/**", State: FilterInclude},
+		{Pattern: "dir3/**", State: FilterInclude},
 		{Pattern: "*", State: FilterExclude},
 	}
 
@@ -553,10 +550,10 @@ func TestFilterRuleOrdering(t *testing.T) {
 		newFilterMap[k] = v
 	}
 
-	// Add a new TV show exclusion - should go before "TV/**"
-	newFilterMap["TV/New Show/**"] = FilterExclude
-	// Add a new music exclusion - should go before "music/**"
-	newFilterMap["music/Classical/**"] = FilterExclude
+	// Add a new dir1 exclusion - should go before "dir1/**"
+	newFilterMap["dir1/sub3/**"] = FilterExclude
+	// Add a new dir2 exclusion - should go before "dir2/**"
+	newFilterMap["dir2/subdir/**"] = FilterExclude
 	// Add a new top-level exclusion - should go before "*"
 	newFilterMap["temp"] = FilterExclude
 
@@ -580,14 +577,13 @@ func TestFilterRuleOrdering(t *testing.T) {
 
 	// Verify the order is correct
 	expectedPatterns := []string{
-		"- TV/Pretty Little Liars/**",
-		"- TV/The Mentalist/**",
-		"- TV/Lost/**",
-		"- TV/New Show/**", // New rule should be inserted here
-		"+ TV/**",
-		"- music/Classical/**", // New rule should be inserted here
-		"+ music/**",
-		"+ movies/**",
+		"- dir1/sub1/**",
+		"- dir1/sub2/**",
+		"- dir1/sub3/**", // New rule should be inserted here
+		"+ dir1/**",
+		"- dir2/subdir/**", // New rule should be inserted here
+		"+ dir2/**",
+		"+ dir3/**",
 		"- temp", // New rule should be inserted here
 		"- *",
 	}
@@ -616,7 +612,7 @@ func TestDirectoryExclusionPattern(t *testing.T) {
 
 	// Create test nodes - directory and file
 	dirNode := &FileNode{
-		Path:   "/test/TV/Supernatural",
+		Path:   "/test/dir1/subdir",
 		IsDir:  true,
 		Filter: FilterNone,
 	}
@@ -688,7 +684,7 @@ func TestSpaceKeyDirectoryExclusion(t *testing.T) {
 
 	// Create test directory node
 	dirNode := &FileNode{
-		Path:   "/test/TV/Supernatural",
+		Path:   "/test/dir1/subdir",
 		IsDir:  true,
 		Filter: FilterNone,
 	}
@@ -784,13 +780,13 @@ func TestInvertSelectionDirectoryPattern(t *testing.T) {
 
 	// Create mixed nodes
 	dirNode := &FileNode{
-		Path:   "/test/music/Jazz",
+		Path:   "/test/dir2/subdir",
 		IsDir:  true,
 		Filter: FilterInclude, // Will be inverted to FilterExclude
 	}
 
 	fileNode := &FileNode{
-		Path:   "/test/song.mp3",
+		Path:   "/test/file.txt",
 		IsDir:  false,
 		Filter: FilterInclude, // Will be inverted to FilterExclude
 	}
@@ -832,21 +828,21 @@ func TestInvertSelectionDirectoryPattern(t *testing.T) {
 func TestSaveFilterFileWithDirectoryPatterns(t *testing.T) {
 	// Test that the save functionality works correctly with /** patterns
 
-	tempFile := "test_dir_patterns.txt"
+	tempFile := "test_patterns.txt"
 	defer os.Remove(tempFile)
 
 	// Create original rules
 	originalRules := []FilterRule{
-		{Pattern: "TV/**", State: FilterInclude},
+		{Pattern: "dir1/**", State: FilterInclude},
 		{Pattern: "*", State: FilterExclude},
 	}
 
 	// Create filterMap with directory patterns (/** ending)
 	filterMap := map[string]FilterState{
-		"TV/**":              FilterInclude,
-		"TV/Supernatural/**": FilterExclude, // New directory exclusion
-		"file.txt":           FilterExclude, // New file exclusion
-		"*":                  FilterExclude,
+		"dir1/**":        FilterInclude,
+		"dir1/subdir/**": FilterExclude, // New directory exclusion
+		"file.txt":       FilterExclude, // New file exclusion
+		"*":              FilterExclude,
 	}
 
 	// Save with new directory patterns
@@ -872,7 +868,7 @@ func TestSaveFilterFileWithDirectoryPatterns(t *testing.T) {
 	foundFilePattern := false
 
 	for _, line := range lines {
-		if strings.Contains(line, "TV/Supernatural/**") {
+		if strings.Contains(line, "dir1/subdir/**") {
 			foundDirPattern = true
 		}
 		if strings.Contains(line, "file.txt") && !strings.Contains(line, "/**") {
@@ -881,7 +877,7 @@ func TestSaveFilterFileWithDirectoryPatterns(t *testing.T) {
 	}
 
 	if !foundDirPattern {
-		t.Errorf("Directory pattern 'TV/Supernatural/**' not found in saved file")
+		t.Errorf("Directory pattern 'dir1/subdir/**' not found in saved file")
 	}
 
 	if !foundFilePattern {
@@ -1029,4 +1025,649 @@ func TestHelpTextCompleteness(t *testing.T) {
 	}
 
 	t.Logf("✅ Help text includes all required shortcuts")
+}
+
+func TestFilterStatusDisplayWithRealFilterFile(t *testing.T) {
+	// Test the filter status display with actual filter.txt content
+	filterRules := []FilterRule{
+		{Pattern: "dir1/sub1/**", State: FilterExclude},
+		{Pattern: "dir1/sub2/**", State: FilterExclude},
+		{Pattern: "dir1/**", State: FilterInclude},
+		{Pattern: "dir2/**", State: FilterInclude},
+		{Pattern: "dir3/**", State: FilterInclude},
+		{Pattern: "*", State: FilterExclude},
+	}
+
+	// Set up global root path for test/folder_a
+	originalGlobalRootPath := globalRootPath
+	testDirPath, _ := filepath.Abs("test/folder_a")
+	globalRootPath = testDirPath
+	defer func() { globalRootPath = originalGlobalRootPath }()
+
+	// Test cases based on actual test/folder_a structure and filter.txt rules
+	testCases := []struct {
+		path           string
+		expectedFilter FilterState
+		description    string
+	}{
+		// Root should be excluded by catch-all "*" rule
+		{testDirPath, FilterExclude, "root directory should be excluded by catch-all"},
+
+		// dir1 directory should be included by "dir1/**" rule
+		{filepath.Join(testDirPath, "dir1"), FilterInclude, "dir1 directory should be included"},
+
+		// Excluded subdirs (specific exclusions should win over general inclusion)
+		{filepath.Join(testDirPath, "dir1", "sub1"), FilterExclude, "sub1 should be excluded"},
+		{filepath.Join(testDirPath, "dir1", "sub2"), FilterExclude, "sub2 should be excluded"},
+
+		// Included subdirs (should match "dir1/**" rule)
+		{filepath.Join(testDirPath, "dir1", "subdir1"), FilterInclude, "subdir1 should be included"},
+
+		// Other included directories
+		{filepath.Join(testDirPath, "dir2"), FilterInclude, "dir2 directory should be included"},
+		{filepath.Join(testDirPath, "dir3"), FilterInclude, "dir3 directory should be included"},
+
+		// Excluded files/dirs (catch-all "*" rule)
+		{filepath.Join(testDirPath, "1.txt"), FilterExclude, "1.txt should be excluded by catch-all"},
+		{filepath.Join(testDirPath, "2.txt"), FilterExclude, "2.txt should be excluded by catch-all"},
+	}
+
+	for _, tc := range testCases {
+		filterPath := getFilterPath(tc.path)
+		actualFilter := getEffectiveFilter(filterPath, filterRules)
+
+		if actualFilter != tc.expectedFilter {
+			var actualStr, expectedStr string
+			switch actualFilter {
+			case FilterInclude:
+				actualStr = "INCLUDE"
+			case FilterExclude:
+				actualStr = "EXCLUDE"
+			case FilterNone:
+				actualStr = "NONE"
+			}
+			switch tc.expectedFilter {
+			case FilterInclude:
+				expectedStr = "INCLUDE"
+			case FilterExclude:
+				expectedStr = "EXCLUDE"
+			case FilterNone:
+				expectedStr = "NONE"
+			}
+
+			t.Errorf("%s: path=%s, filterPath=%s, expected=%s, got=%s",
+				tc.description, tc.path, filterPath, expectedStr, actualStr)
+		}
+	}
+}
+
+func TestApplicationFilterBehaviorWithRealFiles(t *testing.T) {
+	// Test how the application actually loads and processes the real filter.txt and test/folder_a
+
+	// Create a test filter file instead of using the actual filter.txt
+	tempFilter := "test_app_filter.txt"
+	defer os.Remove(tempFilter)
+
+	filterContent := `- dir1/sub1/**
+- dir1/sub2/**
++ dir1/**
++ dir2/**
++ dir3/**
+- *`
+
+	err := os.WriteFile(tempFilter, []byte(filterContent), 0644)
+	if err != nil {
+		t.Fatalf("Failed to create test filter file: %v", err)
+	}
+
+	// Load the test filter file
+	filterRules, filterMap := loadFilterFile(tempFilter)
+
+	if len(filterRules) == 0 {
+		t.Skip("filter.txt not found or empty, skipping test")
+	}
+
+	t.Logf("Loaded %d filter rules from filter.txt:", len(filterRules))
+	for i, rule := range filterRules {
+		var stateStr string
+		switch rule.State {
+		case FilterInclude:
+			stateStr = "INCLUDE"
+		case FilterExclude:
+			stateStr = "EXCLUDE"
+		case FilterNone:
+			stateStr = "NONE"
+		}
+		t.Logf("  %d: %s %s", i+1, stateStr, rule.Pattern)
+	}
+
+	// Create model like the real application does
+	model := &Model{
+		filterRules: filterRules,
+		filterMap:   filterMap,
+	}
+
+	// Debug the loaded filterMap
+	t.Logf("Loaded filterMap has %d entries:", len(filterMap))
+	for pattern, state := range filterMap {
+		var stateStr string
+		switch state {
+		case FilterInclude:
+			stateStr = "INCLUDE"
+		case FilterExclude:
+			stateStr = "EXCLUDE"
+		case FilterNone:
+			stateStr = "NONE"
+		}
+		t.Logf("  filterMap['%s'] = %s", pattern, stateStr)
+	}
+
+	// Set up global root path like the real application
+	originalGlobalRootPath := globalRootPath
+	testDirPath, err := filepath.Abs("test/folder_a")
+	if err != nil {
+		t.Skip("test/folder_a not found, skipping test")
+	}
+	globalRootPath = testDirPath
+	defer func() { globalRootPath = originalGlobalRootPath }()
+
+	// Test key paths that should have specific behavior
+	testCases := []struct {
+		relativePath   string
+		expectedFilter FilterState
+		description    string
+	}{
+		{"dir1", FilterInclude, "dir1 directory should be included by 'dir1/**'"},
+		{"dir1/sub1", FilterExclude, "sub1 should be excluded by specific rule"},
+		{"dir1/sub2", FilterExclude, "sub2 should be excluded by specific rule"},
+		{"dir1/subdir1", FilterInclude, "subdir1 should be included by 'dir1/**' (no specific exclusion)"},
+		{"dir2", FilterInclude, "dir2 directory should be included by 'dir2/**'"},
+		{"dir3", FilterInclude, "dir3 directory should be included by 'dir3/**'"},
+		{"1.txt", FilterExclude, "1.txt should be excluded by catch-all '*'"},
+		{"2.txt", FilterExclude, "2.txt should be excluded by catch-all '*'"},
+	}
+
+	for _, tc := range testCases {
+		fullPath := filepath.Join(testDirPath, tc.relativePath)
+		filterPath := getFilterPath(fullPath)
+		actualFilter := model.getEffectiveFilterWithMap(filterPath)
+
+		var actualStr, expectedStr string
+		switch actualFilter {
+		case FilterInclude:
+			actualStr = "INCLUDE"
+		case FilterExclude:
+			actualStr = "EXCLUDE"
+		case FilterNone:
+			actualStr = "NONE"
+		}
+		switch tc.expectedFilter {
+		case FilterInclude:
+			expectedStr = "INCLUDE"
+		case FilterExclude:
+			expectedStr = "EXCLUDE"
+		case FilterNone:
+			expectedStr = "NONE"
+		}
+
+		if actualFilter != tc.expectedFilter {
+			t.Errorf("%s: relativePath=%s, fullPath=%s, filterPath=%s, expected=%s, got=%s",
+				tc.description, tc.relativePath, fullPath, filterPath, expectedStr, actualStr)
+		} else {
+			t.Logf("✅ %s: %s -> %s (%s)", tc.description, tc.relativePath, filterPath, actualStr)
+		}
+	}
+}
+
+func TestDebugFilterMatching(t *testing.T) {
+	// Debug the specific failing cases
+	filterRules := []FilterRule{
+		{Pattern: "dir1/sub1/**", State: FilterExclude},
+		{Pattern: "dir1/sub2/**", State: FilterExclude},
+		{Pattern: "dir1/**", State: FilterInclude},
+		{Pattern: "dir2/**", State: FilterInclude},
+		{Pattern: "dir3/**", State: FilterInclude},
+		{Pattern: "*", State: FilterExclude},
+	}
+
+	// Set up global root path for test/folder_a
+	originalGlobalRootPath := globalRootPath
+	testDirPath, _ := filepath.Abs("test/folder_a")
+	globalRootPath = testDirPath
+	defer func() { globalRootPath = originalGlobalRootPath }()
+
+	// Debug specific cases
+	debugCases := []string{"/dir1", "/dir1/sub1", "/dir1/sub2", "/dir2", "/dir3"}
+
+	for _, testPath := range debugCases {
+		t.Logf("\nTesting path: %s", testPath)
+
+		// Show which rules match
+		for i, rule := range filterRules {
+			matches := matchesRclonePattern(rule.Pattern, testPath)
+			exact := rule.Pattern == testPath
+
+			var stateStr string
+			switch rule.State {
+			case FilterInclude:
+				stateStr = "INCLUDE"
+			case FilterExclude:
+				stateStr = "EXCLUDE"
+			case FilterNone:
+				stateStr = "NONE"
+			}
+
+			t.Logf("  Rule %d: %s '%s' | exact=%v matches=%v",
+				i+1, stateStr, rule.Pattern, exact, matches)
+
+			if exact || matches {
+				t.Logf("    -> FIRST MATCH! Result: %s", stateStr)
+				break
+			}
+		}
+
+		// Show final result
+		result := getEffectiveFilter(testPath, filterRules)
+		var resultStr string
+		switch result {
+		case FilterInclude:
+			resultStr = "INCLUDE"
+		case FilterExclude:
+			resultStr = "EXCLUDE"
+		case FilterNone:
+			resultStr = "NONE"
+		}
+		t.Logf("  Final result: %s", resultStr)
+	}
+}
+
+func TestModelGetEffectiveFilterWithMap(t *testing.T) {
+	// Test the model's getEffectiveFilterWithMap method directly
+	filterRules := []FilterRule{
+		{Pattern: "dir1/sub1/**", State: FilterExclude},
+		{Pattern: "dir1/sub2/**", State: FilterExclude},
+		{Pattern: "dir1/**", State: FilterInclude},
+		{Pattern: "dir2/**", State: FilterInclude},
+		{Pattern: "dir3/**", State: FilterInclude},
+		{Pattern: "*", State: FilterExclude},
+	}
+
+	// Create model like the real application does
+	model := &Model{
+		filterRules: filterRules,
+		filterMap:   make(map[string]FilterState), // Empty filterMap like at startup
+	}
+
+	// Set up global root path for test/folder_a
+	originalGlobalRootPath := globalRootPath
+	testDirPath, _ := filepath.Abs("test/folder_a")
+	globalRootPath = testDirPath
+	defer func() { globalRootPath = originalGlobalRootPath }()
+
+	// Test the problematic cases
+	testCases := []struct {
+		path           string
+		expectedFilter FilterState
+		description    string
+	}{
+		{"/dir1/sub1", FilterExclude, "dir1/sub1 should be excluded"},
+		{"/dir2", FilterInclude, "dir2 should be included"},
+	}
+
+	for _, tc := range testCases {
+		actualFilter := model.getEffectiveFilterWithMap(tc.path)
+
+		var actualStr, expectedStr string
+		switch actualFilter {
+		case FilterInclude:
+			actualStr = "INCLUDE"
+		case FilterExclude:
+			actualStr = "EXCLUDE"
+		case FilterNone:
+			actualStr = "NONE"
+		}
+		switch tc.expectedFilter {
+		case FilterInclude:
+			expectedStr = "INCLUDE"
+		case FilterExclude:
+			expectedStr = "EXCLUDE"
+		case FilterNone:
+			expectedStr = "NONE"
+		}
+
+		if actualFilter != tc.expectedFilter {
+			t.Errorf("%s: path=%s, expected=%s, got=%s",
+				tc.description, tc.path, expectedStr, actualStr)
+		} else {
+			t.Logf("✅ %s: %s -> %s", tc.description, tc.path, actualStr)
+		}
+	}
+}
+
+func TestChildrenFilterUpdateOnFolderChangeSimple(t *testing.T) {
+	// Create a simple test case to verify children filter updates
+	model := &Model{
+		filterMap:   make(map[string]FilterState),
+		filterRules: []FilterRule{},
+	}
+
+	// Set up global root path
+	originalGlobalRootPath := globalRootPath
+	globalRootPath = "/test"
+	defer func() { globalRootPath = originalGlobalRootPath }()
+
+	// Create a simple parent with children
+	parent := &FileNode{
+		Name:   "parent",
+		Path:   "/test/parent",
+		IsDir:  true,
+		Filter: FilterNone,
+		Children: []*FileNode{
+			{
+				Name:   "child.txt",
+				Path:   "/test/parent/child.txt",
+				IsDir:  false,
+				Filter: FilterNone,
+			},
+		},
+	}
+
+	// Test the pattern matching logic directly first
+	t.Logf("=== Testing Pattern Matching ===")
+	parentPattern := "parent/**"
+	childPath := "parent/child.txt"
+	matches := matchesRclonePattern(parentPattern, childPath)
+	t.Logf("Pattern '%s' matches path '%s': %t", parentPattern, childPath, matches)
+
+	if !matches {
+		t.Errorf("Expected pattern '%s' to match path '%s'", parentPattern, childPath)
+	}
+
+	// Test the getFilterPath function
+	t.Logf("\n=== Testing Filter Path Generation ===")
+	t.Logf("Global root path: '%s'", globalRootPath)
+	parentFilterPath := getFilterPath(parent.Path)
+	childFilterPath := getFilterPath(parent.Children[0].Path)
+	t.Logf("Parent path '%s' -> filter path '%s'", parent.Path, parentFilterPath)
+	t.Logf("Child path '%s' -> filter path '%s'", parent.Children[0].Path, childFilterPath)
+
+	// Let's debug the relative path calculation
+	rel, err := filepath.Rel(globalRootPath, parent.Children[0].Path)
+	t.Logf("Relative path calculation: filepath.Rel('%s', '%s') = '%s', err = %v", globalRootPath, parent.Children[0].Path, rel, err)
+
+	// Also test filepath.Abs
+	absChild, absErr := filepath.Abs(parent.Children[0].Path)
+	t.Logf("filepath.Abs('%s') = '%s', err = %v", parent.Children[0].Path, absChild, absErr)
+
+	// Set up the parent's exclusion pattern in filterMap
+	t.Logf("\n=== Testing Filter Map Logic ===")
+	excludePattern := parentFilterPath + "/**"
+	model.filterMap[excludePattern] = FilterExclude
+	t.Logf("Added pattern '%s' with state FilterExclude to filterMap", excludePattern)
+
+	// Test getEffectiveFilterWithMap directly
+	childState := model.getEffectiveFilterWithMap(childFilterPath)
+	t.Logf("Child effective filter state: %d (expecting %d for FilterExclude)", childState, FilterExclude)
+
+	if childState != FilterExclude {
+		t.Errorf("Expected child to be excluded (state %d), got state %d", FilterExclude, childState)
+	}
+}
+
+func TestChildrenFilterUpdateOnFolderChange(t *testing.T) {
+	// Create a model with a directory tree structure
+	model := &Model{
+		filterMap:   make(map[string]FilterState),
+		filterRules: []FilterRule{},
+	}
+
+	// Set up global root path
+	originalGlobalRootPath := globalRootPath
+	globalRootPath = "/test"
+	defer func() { globalRootPath = originalGlobalRootPath }()
+
+	// Create a directory structure with parent and children
+	// Using more realistic absolute paths
+	parentDir := &FileNode{
+		Name:     "parent_dir",
+		Path:     "/test/parent_dir",
+		IsDir:    true,
+		Filter:   FilterNone,
+		Expanded: true,
+		Children: []*FileNode{
+			{
+				Name:   "child_file1.txt",
+				Path:   "/test/parent_dir/child_file1.txt",
+				IsDir:  false,
+				Filter: FilterNone,
+			},
+			{
+				Name:   "child_dir",
+				Path:   "/test/parent_dir/child_dir",
+				IsDir:  true,
+				Filter: FilterNone,
+				Children: []*FileNode{
+					{
+						Name:   "grandchild.txt",
+						Path:   "/test/parent_dir/child_dir/grandchild.txt",
+						IsDir:  false,
+						Filter: FilterNone,
+					},
+				},
+			},
+		},
+	}
+
+	// Set up parent relationship
+	for _, child := range parentDir.Children {
+		child.Parent = parentDir
+		if child.IsDir {
+			for _, grandchild := range child.Children {
+				grandchild.Parent = child
+			}
+		}
+	}
+
+	model.root = parentDir
+	model.updateVisibleNodes()
+
+	// Helper function to check node filters recursively
+	var checkNodeFilters func(node *FileNode, depth int)
+	checkNodeFilters = func(node *FileNode, depth int) {
+		indent := strings.Repeat("  ", depth)
+		t.Logf("%s%s: Filter=%d", indent, node.Name, node.Filter)
+		if node.IsDir {
+			for _, child := range node.Children {
+				checkNodeFilters(child, depth+1)
+			}
+		}
+	}
+
+	// Helper function to find a node by path
+	var findNode func(node *FileNode, targetPath string) *FileNode
+	findNode = func(node *FileNode, targetPath string) *FileNode {
+		if node.Path == targetPath {
+			return node
+		}
+		if node.IsDir {
+			for _, child := range node.Children {
+				if found := findNode(child, targetPath); found != nil {
+					return found
+				}
+			}
+		}
+		return nil
+	}
+
+	// Verify initial state - all should be FilterNone
+	t.Logf("=== Initial State ===")
+	checkNodeFilters(parentDir, 0)
+
+	// Verify initial states
+	if parentDir.Filter != FilterNone {
+		t.Errorf("Parent should initially have FilterNone, got %d", parentDir.Filter)
+	}
+
+	// Simulate pressing space on the parent directory to exclude it
+	t.Logf("\n=== After excluding parent directory ===")
+	parentDir.Filter = FilterExclude
+
+	// Update filterMap as the space handler would
+	filterPath := getFilterPath(parentDir.Path)
+	filterPath = strings.TrimSuffix(filterPath, "/") + "/**"
+	model.filterMap[filterPath] = FilterExclude
+
+	// Call updateChildrenFilters to update the children
+	t.Logf("Filter map before update: %v", model.filterMap)
+
+	// Debug the filter paths for each child
+	t.Logf("Parent filter path: %s", getFilterPath(parentDir.Path))
+	for _, child := range parentDir.Children {
+		childPath := getFilterPath(child.Path)
+		t.Logf("Child %s filter path: %s", child.Name, childPath)
+		if child.IsDir {
+			for _, grandchild := range child.Children {
+				grandchildPath := getFilterPath(grandchild.Path)
+				t.Logf("  Grandchild %s filter path: %s", grandchild.Name, grandchildPath)
+			}
+		}
+	}
+
+	// Test pattern matching directly before updating children
+	testPattern := "parent_dir/**"
+	testPaths := []string{"parent_dir/child_file1.txt", "parent_dir/child_dir", "parent_dir/child_dir/grandchild.txt"}
+	for _, testPath := range testPaths {
+		matches := matchesRclonePattern(testPattern, testPath)
+		t.Logf("Pattern '%s' matches '%s': %t", testPattern, testPath, matches)
+	}
+
+	model.updateChildrenFilters(parentDir)
+	t.Logf("Filter map after update: %v", model.filterMap)
+
+	// Verify that children now reflect the exclusion
+	checkNodeFilters(parentDir, 0)
+
+	// All children should now be excluded due to the parent's /** pattern
+	expectedChildStates := []struct {
+		path     string
+		name     string
+		expected FilterState
+	}{
+		{"/test/parent_dir", "parent_dir", FilterExclude},
+		{"/test/parent_dir/child_file1.txt", "child_file1.txt", FilterExclude},
+		{"/test/parent_dir/child_dir", "child_dir", FilterExclude},
+		{"/test/parent_dir/child_dir/grandchild.txt", "grandchild.txt", FilterExclude},
+	}
+
+	// Test each expected state
+	for _, expected := range expectedChildStates {
+		foundNode := findNode(parentDir, expected.path)
+
+		if foundNode == nil {
+			t.Errorf("Could not find node with path %s", expected.path)
+			continue
+		}
+
+		if foundNode.Filter != expected.expected {
+			t.Errorf("Node %s (%s): expected filter %d, got %d",
+				expected.name, expected.path, expected.expected, foundNode.Filter)
+		}
+	}
+}
+
+func TestFilterWithParenthesesAndSpaces(t *testing.T) {
+	// Create a test filter file with parentheses and spaces
+	filterContent := `+ dir (with parens)/**
+- bad (old version)/**
++ dir1/**
+- *`
+
+	tempFile := "test_parentheses_filter.txt"
+	defer os.Remove(tempFile)
+
+	err := os.WriteFile(tempFile, []byte(filterContent), 0644)
+	if err != nil {
+		t.Fatalf("Failed to create test filter file: %v", err)
+	}
+
+	// Load the filter file
+	filterRules, filterMap := loadFilterFile(tempFile)
+
+	t.Logf("=== Filter Rules ===")
+	for i, rule := range filterRules {
+		t.Logf("%d: Pattern='%s', State=%d", i, rule.Pattern, rule.State)
+	}
+
+	t.Logf("\n=== Filter Map ===")
+	for pattern, state := range filterMap {
+		t.Logf("Pattern='%s', State=%d", pattern, state)
+	}
+
+	// Verify that patterns with parentheses and spaces are loaded correctly
+	expectedPatterns := []string{
+		"dir (with parens)/**",
+		"bad (old version)/**",
+		"dir1/**",
+		"*",
+	}
+
+	if len(filterRules) != len(expectedPatterns) {
+		t.Errorf("Expected %d filter rules, got %d", len(expectedPatterns), len(filterRules))
+	}
+
+	// Check each pattern
+	for i, expected := range expectedPatterns {
+		if i >= len(filterRules) {
+			t.Errorf("Missing filter rule at index %d for pattern '%s'", i, expected)
+			continue
+		}
+		if filterRules[i].Pattern != expected {
+			t.Errorf("Filter rule %d: expected pattern '%s', got '%s'", i, expected, filterRules[i].Pattern)
+		}
+	}
+
+	// Test effective filtering for paths with parentheses and spaces
+	testCases := []struct {
+		path     string
+		expected FilterState
+		desc     string
+	}{
+		{"dir (with parens)/file.txt", FilterInclude, "should include files in parentheses dir"},
+		{"dir (with parens)", FilterInclude, "should include parentheses directory"},
+		{"bad (old version)/file.txt", FilterExclude, "should exclude files in old version dir"},
+		{"bad (old version)", FilterExclude, "should exclude old version directory"},
+		{"dir1/subdir/file.txt", FilterInclude, "should include dir1 files"},
+		{"random_file.txt", FilterExclude, "should exclude other files due to - *"},
+	}
+
+	t.Logf("\n=== Testing Effective Filters ===")
+	for _, tc := range testCases {
+		result := getEffectiveFilter(tc.path, filterRules)
+		t.Logf("Path: '%s' -> %d (expected %d) - %s", tc.path, result, tc.expected, tc.desc)
+		if result != tc.expected {
+			t.Errorf("getEffectiveFilter('%s') = %d; want %d (%s)", tc.path, result, tc.expected, tc.desc)
+		}
+	}
+
+	// Test the pattern matching directly
+	t.Logf("\n=== Testing Pattern Matching Directly ===")
+	directMatchTests := []struct {
+		pattern  string
+		path     string
+		expected bool
+		desc     string
+	}{
+		{"dir (with parens)/**", "dir (with parens)/file.txt", true, "parentheses pattern should match"},
+		{"bad (old version)/**", "bad (old version)/file.txt", true, "parentheses exclusion should match"},
+		{"dir1/sub dir/**", "dir1/sub dir/file.txt", true, "spaces pattern should match"},
+		{"dir (with parens)/**", "dir with parens/file.txt", false, "should not match without parentheses"},
+	}
+
+	for _, tc := range directMatchTests {
+		result := matchesRclonePattern(tc.pattern, tc.path)
+		t.Logf("Pattern: '%s', Path: '%s' -> %t (expected %t) - %s", tc.pattern, tc.path, result, tc.expected, tc.desc)
+		if result != tc.expected {
+			t.Errorf("matchesRclonePattern('%s', '%s') = %t; want %t (%s)", tc.pattern, tc.path, result, tc.expected, tc.desc)
+		}
+	}
 }
