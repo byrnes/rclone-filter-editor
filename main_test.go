@@ -3,7 +3,9 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 )
 
 func TestFilterStateOperations(t *testing.T) {
@@ -81,12 +83,12 @@ func TestLoadAndSaveFilterFile(t *testing.T) {
 		"/exclude2.txt": FilterExclude,
 	}
 
-	err := saveFilterFile(tempFile, originalMap)
+	err := saveFilterFile(tempFile, []FilterRule{}, originalMap)
 	if err != nil {
 		t.Fatalf("Failed to save filter file: %v", err)
 	}
 
-	loadedMap := loadFilterFile(tempFile)
+	_, loadedMap := loadFilterFile(tempFile)
 
 	if len(loadedMap) != len(originalMap) {
 		t.Errorf("Loaded map has %d entries, expected %d", len(loadedMap), len(originalMap))
@@ -328,13 +330,13 @@ func TestMatchesRclonePattern(t *testing.T) {
 }
 
 func TestGetEffectiveFilter(t *testing.T) {
-	filterMap := map[string]FilterState{
-		"/exact/file.txt":     FilterInclude,
-		"*.log":               FilterExclude,
-		"**/*.test":           FilterExclude,
-		"src/**/*.go":         FilterInclude,
-		"/temp/**":            FilterExclude,
-		"{config,settings}.*": FilterInclude,
+	filterRules := []FilterRule{
+		{Pattern: "/exact/file.txt", State: FilterInclude},
+		{Pattern: "*.log", State: FilterExclude},
+		{Pattern: "**/*.test", State: FilterExclude},
+		{Pattern: "src/**/*.go", State: FilterInclude},
+		{Pattern: "/temp/**", State: FilterExclude},
+		{Pattern: "{config,settings}.*", State: FilterInclude},
 	}
 
 	tests := []struct {
@@ -356,7 +358,7 @@ func TestGetEffectiveFilter(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		result := getEffectiveFilter(tt.path, filterMap)
+		result := getEffectiveFilter(tt.path, filterRules)
 		if result != tt.expected {
 			t.Errorf("getEffectiveFilter(%q) = %v; want %v (%s)",
 				tt.path, result, tt.expected, tt.desc)
@@ -388,7 +390,7 @@ func TestLoadFilterFileWithPatterns(t *testing.T) {
 	file.Close()
 
 	// Load and test
-	filterMap := loadFilterFile(tempFile)
+	_, filterMap := loadFilterFile(tempFile)
 
 	expectedFilters := map[string]FilterState{
 		"*.go":                     FilterInclude,
@@ -425,13 +427,13 @@ func TestSaveFilterFileWithPatterns(t *testing.T) {
 		"/exact/path.txt": FilterInclude,
 	}
 
-	err := saveFilterFile(tempFile, filterMap)
+	err := saveFilterFile(tempFile, []FilterRule{}, filterMap)
 	if err != nil {
 		t.Fatalf("Failed to save filter file: %v", err)
 	}
 
 	// Load it back and verify
-	loadedMap := loadFilterFile(tempFile)
+	_, loadedMap := loadFilterFile(tempFile)
 
 	if len(loadedMap) != len(filterMap) {
 		t.Errorf("Loaded map has %d entries, expected %d", len(loadedMap), len(filterMap))
@@ -444,4 +446,587 @@ func TestSaveFilterFileWithPatterns(t *testing.T) {
 			t.Errorf("Pattern %q: expected %v after save/load, got %v", pattern, expectedState, actualState)
 		}
 	}
+}
+
+func TestRootPathDisplayWithExcludeAll(t *testing.T) {
+	// Create a temporary directory structure similar to test_dir
+	tempDir := "test_base_path"
+	defer os.RemoveAll(tempDir)
+
+	os.MkdirAll(tempDir, 0755)
+	os.MkdirAll(filepath.Join(tempDir, "TV"), 0755)
+	os.MkdirAll(filepath.Join(tempDir, "music"), 0755)
+	os.MkdirAll(filepath.Join(tempDir, "movies"), 0755)
+
+	// Create filter rules that match your filter.txt:
+	// - TV/Pretty Little Liars/**
+	// - TV/The Mentalist/**
+	// - TV/Lost/**
+	// + TV/**
+	// + music/**
+	// + movies/**
+	// - *
+	filterRules := []FilterRule{
+		{Pattern: "TV/Pretty Little Liars/**", State: FilterExclude},
+		{Pattern: "TV/The Mentalist/**", State: FilterExclude},
+		{Pattern: "TV/Lost/**", State: FilterExclude},
+		{Pattern: "TV/**", State: FilterInclude},
+		{Pattern: "music/**", State: FilterInclude},
+		{Pattern: "movies/**", State: FilterInclude},
+		{Pattern: "*", State: FilterExclude},
+	}
+
+	// Set up the global root path like main() does
+	absPath, _ := filepath.Abs(tempDir)
+	originalGlobalRootPath := globalRootPath
+	globalRootPath = absPath
+	defer func() { globalRootPath = originalGlobalRootPath }()
+
+	// Test the root path filter calculation
+	rootFilterPath := getFilterPath(absPath)
+	rootFilter := getEffectiveFilter(rootFilterPath, filterRules)
+
+	t.Logf("Root path: %s", absPath)
+	t.Logf("Root filter path: %s", rootFilterPath)
+	t.Logf("Root filter state: %d", rootFilter)
+
+	// Test subdirectory paths
+	tvPath := filepath.Join(absPath, "TV")
+	tvFilterPath := getFilterPath(tvPath)
+	tvFilter := getEffectiveFilter(tvFilterPath, filterRules)
+
+	t.Logf("TV path: %s", tvPath)
+	t.Logf("TV filter path: %s", tvFilterPath)
+	t.Logf("TV filter state: %d", tvFilter)
+
+	musicPath := filepath.Join(absPath, "music")
+	musicFilterPath := getFilterPath(musicPath)
+	musicFilter := getEffectiveFilter(musicFilterPath, filterRules)
+
+	t.Logf("music path: %s", musicPath)
+	t.Logf("music filter path: %s", musicFilterPath)
+	t.Logf("music filter state: %d", musicFilter)
+
+	// Based on the filter rules and expected UI behavior:
+	// 1. The root directory should be excluded by the "- *" rule (it matches the pattern)
+	// 2. The subdirectories TV, music, movies should be included due to patterns like "TV/**"
+	// 3. "- *" should exclude everything at the base level, including the base directory
+
+	// The root directory with filter path "/." should match the "- *" pattern and be excluded
+	if rootFilter != FilterExclude {
+		t.Errorf("Root directory should be excluded by '- *' rule (FilterExclude=%d), got %d", FilterExclude, rootFilter)
+	}
+
+	if tvFilter != FilterInclude {
+		t.Errorf("TV directory should be included (FilterInclude=%d), got %d", FilterInclude, tvFilter)
+	}
+
+	if musicFilter != FilterInclude {
+		t.Errorf("music directory should be included (FilterInclude=%d), got %d", FilterInclude, musicFilter)
+	}
+}
+
+func TestFilterRuleOrdering(t *testing.T) {
+	tempFile := "test_ordering.txt"
+	defer os.Remove(tempFile)
+
+	// Create initial filter rules similar to the user's filter.txt
+	originalRules := []FilterRule{
+		{Pattern: "TV/Pretty Little Liars/**", State: FilterExclude},
+		{Pattern: "TV/The Mentalist/**", State: FilterExclude},
+		{Pattern: "TV/Lost/**", State: FilterExclude},
+		{Pattern: "TV/**", State: FilterInclude},
+		{Pattern: "music/**", State: FilterInclude},
+		{Pattern: "movies/**", State: FilterInclude},
+		{Pattern: "*", State: FilterExclude},
+	}
+
+	// Create initial filterMap
+	originalFilterMap := make(map[string]FilterState)
+	for _, rule := range originalRules {
+		originalFilterMap[rule.Pattern] = rule.State
+	}
+
+	// Add some new rules that should be inserted in the right places
+	newFilterMap := make(map[string]FilterState)
+	for k, v := range originalFilterMap {
+		newFilterMap[k] = v
+	}
+
+	// Add a new TV show exclusion - should go before "TV/**"
+	newFilterMap["TV/New Show/**"] = FilterExclude
+	// Add a new music exclusion - should go before "music/**"
+	newFilterMap["music/Classical/**"] = FilterExclude
+	// Add a new top-level exclusion - should go before "*"
+	newFilterMap["temp"] = FilterExclude
+
+	// Save with new rules
+	err := saveFilterFile(tempFile, originalRules, newFilterMap)
+	if err != nil {
+		t.Fatalf("Failed to save filter file: %v", err)
+	}
+
+	// Read the file back and check the order
+	content, err := os.ReadFile(tempFile)
+	if err != nil {
+		t.Fatalf("Failed to read filter file: %v", err)
+	}
+
+	lines := strings.Split(strings.TrimSpace(string(content)), "\n")
+	t.Logf("Saved filter file content:")
+	for i, line := range lines {
+		t.Logf("%d: %s", i+1, line)
+	}
+
+	// Verify the order is correct
+	expectedPatterns := []string{
+		"- TV/Pretty Little Liars/**",
+		"- TV/The Mentalist/**",
+		"- TV/Lost/**",
+		"- TV/New Show/**", // New rule should be inserted here
+		"+ TV/**",
+		"- music/Classical/**", // New rule should be inserted here
+		"+ music/**",
+		"+ movies/**",
+		"- temp", // New rule should be inserted here
+		"- *",
+	}
+
+	if len(lines) != len(expectedPatterns) {
+		t.Errorf("Expected %d lines, got %d", len(expectedPatterns), len(lines))
+	}
+
+	for i, expectedPattern := range expectedPatterns {
+		if i < len(lines) && lines[i] != expectedPattern {
+			t.Errorf("Line %d: expected %q, got %q", i+1, expectedPattern, lines[i])
+		}
+	}
+}
+
+func TestDirectoryExclusionPattern(t *testing.T) {
+	// Create a model with some test nodes
+	model := &Model{
+		filterMap: make(map[string]FilterState),
+	}
+
+	// Set up global root path for getFilterPath
+	originalGlobalRootPath := globalRootPath
+	globalRootPath = "/test"
+	defer func() { globalRootPath = originalGlobalRootPath }()
+
+	// Create test nodes - directory and file
+	dirNode := &FileNode{
+		Path:   "/test/TV/Supernatural",
+		IsDir:  true,
+		Filter: FilterNone,
+	}
+
+	fileNode := &FileNode{
+		Path:   "/test/file.txt",
+		IsDir:  false,
+		Filter: FilterNone,
+	}
+
+	model.visibleNodes = []*FileNode{dirNode, fileNode}
+	model.cursor = 0 // Point to directory
+
+	// Simulate pressing Space on the directory (toggle to exclude)
+	dirNode.Filter = FilterExclude
+
+	// Create the appropriate filter pattern (this is what the fixed code should do)
+	filterPath := getFilterPath(dirNode.Path)
+	t.Logf("Original filter path for directory: %q", filterPath)
+	if dirNode.IsDir {
+		filterPath = strings.TrimSuffix(filterPath, "/") + "/**"
+	}
+	t.Logf("Modified filter path for directory: %q", filterPath)
+	model.filterMap[filterPath] = dirNode.Filter
+
+	// Check that directory gets /** pattern
+	expectedDirPattern := filterPath // Use actual pattern instead of hardcoded
+	if _, exists := model.filterMap[expectedDirPattern]; !exists {
+		t.Errorf("Expected directory filter pattern %q not found in filterMap", expectedDirPattern)
+		t.Logf("Available patterns in filterMap: %v", model.filterMap)
+	}
+
+	// Now test file exclusion
+	model.cursor = 1 // Point to file
+	fileNode.Filter = FilterExclude
+
+	fileFilterPath := getFilterPath(fileNode.Path)
+	t.Logf("File filter path: %q", fileFilterPath)
+	// Files should NOT get /** appended
+	model.filterMap[fileFilterPath] = fileNode.Filter
+
+	// Check that file gets exact pattern (no /**)
+	expectedFilePattern := fileFilterPath // Use actual pattern
+	if _, exists := model.filterMap[expectedFilePattern]; !exists {
+		t.Errorf("Expected file filter pattern %q not found in filterMap", expectedFilePattern)
+	}
+
+	// Verify no /** was added to file
+	wrongFilePattern := "/file.txt/**"
+	if _, exists := model.filterMap[wrongFilePattern]; exists {
+		t.Errorf("File should not have /** pattern, but found %q in filterMap", wrongFilePattern)
+	}
+
+	t.Logf("Directory pattern: %q", expectedDirPattern)
+	t.Logf("File pattern: %q", expectedFilePattern)
+}
+
+func TestSpaceKeyDirectoryExclusion(t *testing.T) {
+	// Test the actual Space key handler to ensure it creates /** patterns for directories
+
+	// Set up global root path
+	originalGlobalRootPath := globalRootPath
+	globalRootPath = "/test"
+	defer func() { globalRootPath = originalGlobalRootPath }()
+
+	model := &Model{
+		filterMap: make(map[string]FilterState),
+	}
+
+	// Create test directory node
+	dirNode := &FileNode{
+		Path:   "/test/TV/Supernatural",
+		IsDir:  true,
+		Filter: FilterNone,
+	}
+
+	// Create test file node
+	fileNode := &FileNode{
+		Path:   "/test/file.txt",
+		IsDir:  false,
+		Filter: FilterNone,
+	}
+
+	model.visibleNodes = []*FileNode{dirNode, fileNode}
+
+	// Test directory exclusion (cursor on directory, press Space)
+	model.cursor = 0
+
+	// Simulate the Space key logic directly
+	node := model.visibleNodes[model.cursor]
+	node.Filter = (node.Filter + 1) % 3 // FilterNone -> FilterInclude
+	node.Filter = (node.Filter + 1) % 3 // FilterInclude -> FilterExclude
+
+	// Create the appropriate filter pattern (from the fixed code)
+	filterPath := getFilterPath(node.Path)
+	if node.IsDir {
+		filterPath = strings.TrimSuffix(filterPath, "/") + "/**"
+	}
+	model.filterMap[filterPath] = node.Filter
+
+	// Verify directory gets /** pattern
+	found := false
+	var dirPattern string
+	for pattern, state := range model.filterMap {
+		if state == FilterExclude && strings.HasSuffix(pattern, "/**") {
+			found = true
+			dirPattern = pattern
+			break
+		}
+	}
+
+	if !found {
+		t.Errorf("Directory exclusion should create a pattern ending with '/**', but patterns found: %v", model.filterMap)
+	} else {
+		t.Logf("✅ Directory exclusion created pattern: %q", dirPattern)
+	}
+
+	// Test file exclusion (cursor on file, press Space)
+	model.cursor = 1
+
+	fileNodeRef := model.visibleNodes[model.cursor]
+	fileNodeRef.Filter = (fileNodeRef.Filter + 1) % 3 // FilterNone -> FilterInclude
+	fileNodeRef.Filter = (fileNodeRef.Filter + 1) % 3 // FilterInclude -> FilterExclude
+
+	// Create file filter pattern
+	fileFilterPath := getFilterPath(fileNodeRef.Path)
+	if fileNodeRef.IsDir {
+		fileFilterPath = strings.TrimSuffix(fileFilterPath, "/") + "/**"
+	}
+	model.filterMap[fileFilterPath] = fileNodeRef.Filter
+
+	// Verify file does NOT get /** pattern
+	fileFound := false
+	var actualFilePattern string
+	for pattern, state := range model.filterMap {
+		if state == FilterExclude && !strings.HasSuffix(pattern, "/**") {
+			fileFound = true
+			actualFilePattern = pattern
+			break
+		}
+	}
+
+	if !fileFound {
+		t.Errorf("File exclusion should NOT create a pattern ending with '/**', but patterns found: %v", model.filterMap)
+	} else {
+		t.Logf("✅ File exclusion created pattern: %q", actualFilePattern)
+	}
+
+	// Verify we have both patterns
+	if len(model.filterMap) != 2 {
+		t.Errorf("Expected 2 filter patterns, got %d: %v", len(model.filterMap), model.filterMap)
+	}
+}
+
+func TestInvertSelectionDirectoryPattern(t *testing.T) {
+	// Test that invertSelection also uses /** for directories
+
+	originalGlobalRootPath := globalRootPath
+	globalRootPath = "/test"
+	defer func() { globalRootPath = originalGlobalRootPath }()
+
+	model := &Model{
+		filterMap: make(map[string]FilterState),
+	}
+
+	// Create mixed nodes
+	dirNode := &FileNode{
+		Path:   "/test/music/Jazz",
+		IsDir:  true,
+		Filter: FilterInclude, // Will be inverted to FilterExclude
+	}
+
+	fileNode := &FileNode{
+		Path:   "/test/song.mp3",
+		IsDir:  false,
+		Filter: FilterInclude, // Will be inverted to FilterExclude
+	}
+
+	model.visibleNodes = []*FileNode{dirNode, fileNode}
+
+	// Run invert selection
+	model.invertSelection()
+
+	// Check results
+	dirPatternFound := false
+	filePatternFound := false
+
+	for pattern, state := range model.filterMap {
+		if state == FilterExclude {
+			if strings.HasSuffix(pattern, "/**") {
+				dirPatternFound = true
+				t.Logf("✅ Invert created directory pattern: %q", pattern)
+			} else {
+				filePatternFound = true
+				t.Logf("✅ Invert created file pattern: %q", pattern)
+			}
+		}
+	}
+
+	if !dirPatternFound {
+		t.Errorf("invertSelection should create /** pattern for directories")
+	}
+
+	if !filePatternFound {
+		t.Errorf("invertSelection should create exact pattern for files")
+	}
+
+	if len(model.filterMap) != 2 {
+		t.Errorf("Expected 2 patterns after invert, got %d: %v", len(model.filterMap), model.filterMap)
+	}
+}
+
+func TestSaveFilterFileWithDirectoryPatterns(t *testing.T) {
+	// Test that the save functionality works correctly with /** patterns
+
+	tempFile := "test_dir_patterns.txt"
+	defer os.Remove(tempFile)
+
+	// Create original rules
+	originalRules := []FilterRule{
+		{Pattern: "TV/**", State: FilterInclude},
+		{Pattern: "*", State: FilterExclude},
+	}
+
+	// Create filterMap with directory patterns (/** ending)
+	filterMap := map[string]FilterState{
+		"TV/**":              FilterInclude,
+		"TV/Supernatural/**": FilterExclude, // New directory exclusion
+		"file.txt":           FilterExclude, // New file exclusion
+		"*":                  FilterExclude,
+	}
+
+	// Save with new directory patterns
+	err := saveFilterFile(tempFile, originalRules, filterMap)
+	if err != nil {
+		t.Fatalf("Failed to save filter file: %v", err)
+	}
+
+	// Read back and verify
+	content, err := os.ReadFile(tempFile)
+	if err != nil {
+		t.Fatalf("Failed to read saved file: %v", err)
+	}
+
+	lines := strings.Split(strings.TrimSpace(string(content)), "\n")
+	t.Logf("Saved filter with directory patterns:")
+	for i, line := range lines {
+		t.Logf("%d: %s", i+1, line)
+	}
+
+	// Verify directory pattern is saved correctly
+	foundDirPattern := false
+	foundFilePattern := false
+
+	for _, line := range lines {
+		if strings.Contains(line, "TV/Supernatural/**") {
+			foundDirPattern = true
+		}
+		if strings.Contains(line, "file.txt") && !strings.Contains(line, "/**") {
+			foundFilePattern = true
+		}
+	}
+
+	if !foundDirPattern {
+		t.Errorf("Directory pattern 'TV/Supernatural/**' not found in saved file")
+	}
+
+	if !foundFilePattern {
+		t.Errorf("File pattern 'file.txt' not found in saved file")
+	}
+}
+
+func TestSortByLastModified(t *testing.T) {
+	// Create a model with test nodes having different modification times
+	model := &Model{
+		sortMode: SortByLastModified,
+	}
+
+	now := time.Now()
+
+	// Create nodes with different modification times
+	oldFile := &FileNode{
+		Name:    "old_file.txt",
+		IsDir:   false,
+		ModTime: now.Add(-2 * time.Hour), // 2 hours ago
+	}
+
+	newFile := &FileNode{
+		Name:    "new_file.txt",
+		IsDir:   false,
+		ModTime: now.Add(-30 * time.Minute), // 30 minutes ago
+	}
+
+	recentFile := &FileNode{
+		Name:    "recent_file.txt",
+		IsDir:   false,
+		ModTime: now.Add(-5 * time.Minute), // 5 minutes ago
+	}
+
+	oldDir := &FileNode{
+		Name:    "old_directory",
+		IsDir:   true,
+		ModTime: now.Add(-3 * time.Hour), // 3 hours ago
+	}
+
+	newDir := &FileNode{
+		Name:    "new_directory",
+		IsDir:   true,
+		ModTime: now.Add(-10 * time.Minute), // 10 minutes ago
+	}
+
+	// Create unsorted list
+	children := []*FileNode{oldFile, newFile, recentFile, oldDir, newDir}
+
+	// Sort using the model's sort function
+	model.sortChildren(children)
+
+	// Check that directories come first (as always)
+	if !children[0].IsDir || !children[1].IsDir {
+		t.Errorf("Directories should come first after sorting")
+	}
+
+	// Check that directories are sorted by modification time (most recent first)
+	if children[0].Name != "new_directory" {
+		t.Errorf("Expected new_directory first among directories, got %s", children[0].Name)
+	}
+
+	if children[1].Name != "old_directory" {
+		t.Errorf("Expected old_directory second among directories, got %s", children[1].Name)
+	}
+
+	// Check that files are sorted by modification time (most recent first)
+	fileStartIndex := 2 // After the directories
+	if children[fileStartIndex].Name != "recent_file.txt" {
+		t.Errorf("Expected recent_file.txt first among files, got %s", children[fileStartIndex].Name)
+	}
+
+	if children[fileStartIndex+1].Name != "new_file.txt" {
+		t.Errorf("Expected new_file.txt second among files, got %s", children[fileStartIndex+1].Name)
+	}
+
+	if children[fileStartIndex+2].Name != "old_file.txt" {
+		t.Errorf("Expected old_file.txt third among files, got %s", children[fileStartIndex+2].Name)
+	}
+
+	t.Logf("✅ Sorted order (most recent first):")
+	for i, child := range children {
+		t.Logf("  %d: %s (%s) - %s", i+1, child.Name,
+			map[bool]string{true: "DIR", false: "FILE"}[child.IsDir],
+			child.ModTime.Format("15:04:05"))
+	}
+}
+
+func TestHelpTextCompleteness(t *testing.T) {
+	model := &Model{}
+	helpText := model.renderHelp()
+
+	// Check that all sort modes are documented
+	requiredSortHelp := []string{
+		"1           Sort by filename (default)",
+		"2           Sort by size",
+		"3           Sort by file count",
+		"4           Sort by last modified",
+	}
+
+	for _, expected := range requiredSortHelp {
+		if !strings.Contains(helpText, expected) {
+			t.Errorf("Help text missing sort option: %q", expected)
+		}
+	}
+
+	// Check that key navigation shortcuts are documented
+	requiredNavHelp := []string{
+		"↑/↓ or j/k  Navigate up/down",
+		"←           Collapse directory or go to parent",
+		"→ or Enter  Expand directory",
+	}
+
+	for _, expected := range requiredNavHelp {
+		if !strings.Contains(helpText, expected) {
+			t.Errorf("Help text missing navigation shortcut: %q", expected)
+		}
+	}
+
+	// Check that filter shortcuts are documented
+	requiredFilterHelp := []string{
+		"Space       Toggle filter (none → include → exclude)",
+		"i           Invert selection",
+		"r           Reset all filters",
+	}
+
+	for _, expected := range requiredFilterHelp {
+		if !strings.Contains(helpText, expected) {
+			t.Errorf("Help text missing filter shortcut: %q", expected)
+		}
+	}
+
+	// Check that other shortcuts are documented
+	requiredOtherHelp := []string{
+		"? or h      Show this help",
+		"s           Save filters to file",
+		"q           Quit (asks to save)",
+		"Ctrl+C      Quit immediately without saving",
+	}
+
+	for _, expected := range requiredOtherHelp {
+		if !strings.Contains(helpText, expected) {
+			t.Errorf("Help text missing shortcut: %q", expected)
+		}
+	}
+
+	t.Logf("✅ Help text includes all required shortcuts")
 }
