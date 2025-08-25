@@ -21,6 +21,7 @@ go.work.sum
 # Build output
 bin/
 dist/
+test_dir/
 
 # IDE files
 .vscode/

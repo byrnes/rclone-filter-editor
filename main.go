@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"flag"
 	"fmt"
 	"os"
@@ -9,6 +10,9 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -22,6 +26,18 @@ const (
 	FilterExclude
 )
 
+type loadingMsg struct {
+	progress string
+	dirs     int64
+	files    int64
+}
+
+type treeReadyMsg struct {
+	root *FileNode
+}
+
+type refreshMsg struct{}
+
 type FileNode struct {
 	Name     string
 	Path     string
@@ -34,6 +50,8 @@ type FileNode struct {
 
 	TotalSize  int64
 	TotalFiles int
+	Loading    bool
+	mu         sync.RWMutex
 }
 
 type Model struct {
@@ -47,6 +65,14 @@ type Model struct {
 	width           int
 	height          int
 	scrollOffset    int
+	loading         bool
+	loadProgress    string
+	scannedDirs     int64
+	scannedFiles    int64
+	ctx             context.Context
+	cancel          context.CancelFunc
+	program         *tea.Program
+	checkers        int
 }
 
 func main() {
@@ -54,10 +80,12 @@ func main() {
 	var basePath string
 	var showHelp bool
 
+	var checkers int
 	flag.StringVar(&filterFile, "file", "", "Path to the rclone filter file")
 	flag.StringVar(&filterFile, "f", "", "Path to the rclone filter file (shorthand)")
 	flag.StringVar(&basePath, "path", "", "Base directory to browse (default: current directory)")
 	flag.StringVar(&basePath, "p", "", "Base directory to browse (shorthand)")
+	flag.IntVar(&checkers, "checkers", 4, "Number of concurrent directory scanning threads")
 	flag.BoolVar(&showHelp, "help", false, "Show usage information")
 	flag.BoolVar(&showHelp, "h", false, "Show usage information (shorthand)")
 
@@ -70,9 +98,9 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Options:\n")
 		flag.PrintDefaults()
 		fmt.Fprintf(os.Stderr, "\nExamples:\n")
-		fmt.Fprintf(os.Stderr, "  %s                           # Use filter.txt in current directory\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  %s                           # Use filter.txt in current directory (4 threads)\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "  %s myfilters.txt             # Use myfilters.txt in current directory\n", os.Args[0])
-		fmt.Fprintf(os.Stderr, "  %s myfilters.txt /path/dir   # Use myfilters.txt, browse /path/dir\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  %s --checkers 8 /path/dir    # Use 8 threads to scan /path/dir\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "  %s --file myfilters.txt      # Use --file flag\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "  %s --path /path/dir          # Browse /path/dir with default filter.txt\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "  %s -f filters.txt -p /path   # Use specific filter file and path\n", os.Args[0])
@@ -113,21 +141,50 @@ func main() {
 
 	filterMap := loadFilterFile(filterFile)
 
-	root := buildFileTree(rootPath, filterMap)
-	calculateStats(root)
+	// Set the global root path for filter path calculations
+	absRootPath, _ := filepath.Abs(rootPath)
+	globalRootPath = absRootPath
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	if checkers < 1 {
+		checkers = 4
+	}
 
 	m := Model{
-		root:       root,
-		filterMap:  filterMap,
-		filterFile: filterFile,
+		filterMap:    filterMap,
+		filterFile:   filterFile,
+		loading:      true,
+		loadProgress: "Scanning directories...",
+		ctx:          ctx,
+		cancel:       cancel,
+		checkers:     checkers,
 	}
+
+	// Initialize root node immediately for UI
+	absPath, _ := filepath.Abs(rootPath)
+	m.root = &FileNode{
+		Name:     filepath.Base(absPath),
+		Path:     absPath,
+		IsDir:    true,
+		Expanded: true,
+		Loading:  true,
+	}
+	rootFilterPath := getFilterPath(absPath)
+	m.root.Filter = getEffectiveFilter(rootFilterPath, filterMap)
 	m.updateVisibleNodes()
 
 	p := tea.NewProgram(&m, tea.WithAltScreen())
+	m.program = p
+
+	// Start async tree building after program is set
+	go m.buildFileTreeAsync(rootPath)
+
 	if _, err := p.Run(); err != nil {
 		fmt.Printf("Error: %v\n", err)
 		os.Exit(1)
 	}
+
 }
 
 func buildFileTree(rootPath string, filterMap map[string]FilterState) *FileNode {
@@ -146,7 +203,140 @@ func buildFileTree(rootPath string, filterMap map[string]FilterState) *FileNode 
 	return root
 }
 
+func (m *Model) buildFileTreeAsync(rootPath string) {
+	// Start background goroutine for breadth-first concurrent tree building
+	go func() {
+		m.buildTreeBreadthFirst(m.root, m.filterMap)
+		// Send completion message
+		if m.program != nil {
+			m.program.Send(treeReadyMsg{root: m.root})
+		}
+	}()
+}
+
+// Breadth-first concurrent directory scanning
+func (m *Model) buildTreeBreadthFirst(root *FileNode, filterMap map[string]FilterState) {
+	// Use a queue for breadth-first traversal
+	queue := []*FileNode{root}
+
+	for len(queue) > 0 && m.ctx.Err() == nil {
+		// Process current level
+		currentLevel := queue
+		queue = nil
+
+		// Process directories at current level concurrently
+		var wg sync.WaitGroup
+		nextLevelChan := make(chan []*FileNode, len(currentLevel))
+		semaphore := make(chan struct{}, m.checkers)
+
+		for _, dir := range currentLevel {
+			if !dir.IsDir {
+				continue
+			}
+
+			wg.Add(1)
+			go func(node *FileNode) {
+				defer wg.Done()
+				semaphore <- struct{}{}        // Acquire
+				defer func() { <-semaphore }() // Release
+
+				children := m.scanSingleDirectory(node, filterMap)
+				nextLevelChan <- children
+			}(dir)
+		}
+
+		// Wait for all directories in current level to complete
+		go func() {
+			wg.Wait()
+			close(nextLevelChan)
+		}()
+
+		// Collect children for next level
+		for children := range nextLevelChan {
+			queue = append(queue, children...)
+		}
+	}
+}
+
+// Scan a single directory and return its child directories
+func (m *Model) scanSingleDirectory(node *FileNode, filterMap map[string]FilterState) []*FileNode {
+	select {
+	case <-m.ctx.Done():
+		return nil
+	default:
+	}
+
+	entries, err := os.ReadDir(node.Path)
+	if err != nil {
+		node.mu.Lock()
+		node.Loading = false
+		node.mu.Unlock()
+		return nil
+	}
+
+	// Update progress
+	dirs := atomic.AddInt64(&m.scannedDirs, 1)
+	if dirs%10 == 0 && m.program != nil {
+		m.program.Send(loadingMsg{
+			progress: "Scanning directories...",
+			dirs:     dirs,
+			files:    atomic.LoadInt64(&m.scannedFiles),
+		})
+	}
+
+	var children []*FileNode
+	var childDirectories []*FileNode
+
+	for _, entry := range entries {
+		childPath := filepath.Join(node.Path, entry.Name())
+		child := &FileNode{
+			Name:   entry.Name(),
+			Path:   childPath,
+			IsDir:  entry.IsDir(),
+			Parent: node,
+		}
+
+		childFilterPath := getFilterPath(childPath)
+		child.Filter = getEffectiveFilter(childFilterPath, filterMap)
+
+		if !entry.IsDir() {
+			if info, err := entry.Info(); err == nil {
+				child.Size = info.Size()
+			}
+			files := atomic.AddInt64(&m.scannedFiles, 1)
+			if m.program != nil && files%500 == 0 {
+				m.program.Send(loadingMsg{
+					progress: "Scanning directories...",
+					dirs:     atomic.LoadInt64(&m.scannedDirs),
+					files:    files,
+				})
+			}
+		} else {
+			child.Loading = true
+			childDirectories = append(childDirectories, child)
+		}
+
+		children = append(children, child)
+	}
+
+	// Sort children
+	sort.Slice(children, func(i, j int) bool {
+		if children[i].IsDir != children[j].IsDir {
+			return children[i].IsDir
+		}
+		return strings.ToLower(children[i].Name) < strings.ToLower(children[j].Name)
+	})
+
+	node.mu.Lock()
+	node.Children = children
+	node.Loading = false
+	node.mu.Unlock()
+
+	return childDirectories
+}
+
 func buildTreeRecursive(node *FileNode, filterMap map[string]FilterState) {
+	// This function is kept for compatibility but not used in async version
 	if !node.IsDir {
 		return
 	}
@@ -217,18 +407,44 @@ func (m *Model) addVisibleNodesRecursive(node *FileNode, depth int) {
 	m.visibleNodes = append(m.visibleNodes, node)
 
 	if node.IsDir && node.Expanded {
-		for _, child := range node.Children {
+		node.mu.RLock()
+		children := node.Children
+		node.mu.RUnlock()
+		for _, child := range children {
 			m.addVisibleNodesRecursive(child, depth+1)
 		}
 	}
 }
 
 func (m Model) Init() tea.Cmd {
-	return nil
+	return tea.Tick(50*time.Millisecond, func(t time.Time) tea.Msg {
+		return refreshMsg{}
+	})
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case loadingMsg:
+		m.loadProgress = msg.progress
+		atomic.StoreInt64(&m.scannedDirs, msg.dirs)
+		atomic.StoreInt64(&m.scannedFiles, msg.files)
+		return m, nil
+
+	case treeReadyMsg:
+		m.loading = false
+		m.root = msg.root
+		calculateStats(m.root)
+		m.updateVisibleNodes()
+		return m, nil
+
+	case refreshMsg:
+		if m.loading {
+			return m, tea.Tick(50*time.Millisecond, func(t time.Time) tea.Msg {
+				return refreshMsg{}
+			})
+		}
+		return m, nil
+
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
@@ -244,8 +460,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			switch msg.String() {
 			case "y", "Y":
 				saveFilterFile(m.filterFile, m.filterMap)
+				m.cancel()
 				return m, tea.Quit
 			case "n", "N":
+				m.cancel()
 				return m, tea.Quit
 			case "c", "C", "escape":
 				m.showSaveConfirm = false
@@ -260,6 +478,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 
 		case "ctrl+c":
+			m.cancel()
 			return m, tea.Quit
 
 		case "s":
@@ -386,6 +605,10 @@ func (m Model) View() string {
 		return m.renderSaveConfirm()
 	}
 
+	if m.loading {
+		return m.renderLoading()
+	}
+
 	var b strings.Builder
 
 	headerStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("12"))
@@ -413,7 +636,12 @@ func (m Model) View() string {
 
 		var icon string
 		if node.IsDir {
-			if node.Expanded {
+			node.mu.RLock()
+			isLoading := node.Loading
+			node.mu.RUnlock()
+			if isLoading {
+				icon = "⟳ "
+			} else if node.Expanded {
 				icon = "▼ "
 			} else {
 				icon = "▶ "
@@ -508,6 +736,41 @@ func (m Model) renderSaveConfirm() string {
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, confirmStyle.Render(confirm))
 }
 
+func (m Model) renderLoading() string {
+	loadingStyle := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("12")).
+		Padding(2, 4).
+		Align(lipgloss.Center)
+
+	spinner := "⟳"
+	switch (time.Now().UnixNano() / 200000000) % 4 { // Slower spinner rotation
+	case 0:
+		spinner = "▐"
+	case 1:
+		spinner = "▌"
+	case 2:
+		spinner = "▀"
+	case 3:
+		spinner = "▄"
+	}
+
+	dirs := atomic.LoadInt64(&m.scannedDirs)
+	files := atomic.LoadInt64(&m.scannedFiles)
+
+	loadingText := fmt.Sprintf(`%s Loading Directory Tree...
+
+%s
+Directories: %d
+Files: %d
+Threads: %d
+
+Press Ctrl+C to cancel`,
+		spinner, m.loadProgress, dirs, files, m.checkers)
+
+	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, loadingStyle.Render(loadingText))
+}
+
 func getNodeDepth(node *FileNode) int {
 	depth := 0
 	for node.Parent != nil {
@@ -530,13 +793,22 @@ func formatSize(size int64) string {
 	return fmt.Sprintf("%.1f %cB", float64(size)/float64(div), "KMGTPE"[exp])
 }
 
+var globalRootPath string
+
 func getFilterPath(path string) string {
-	wd, _ := os.Getwd()
+	// Use the root path that was provided to the program
 	absPath, _ := filepath.Abs(path)
 
-	rel, err := filepath.Rel(wd, absPath)
+	// Use global root path if set, otherwise fall back to current working directory
+	rootPath := globalRootPath
+	if rootPath == "" {
+		wd, _ := os.Getwd()
+		rootPath = wd
+	}
+
+	rel, err := filepath.Rel(rootPath, absPath)
 	if err != nil {
-		return path
+		return filepath.ToSlash(filepath.Base(path))
 	}
 	return "/" + filepath.ToSlash(rel)
 }
