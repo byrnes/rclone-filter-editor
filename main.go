@@ -170,7 +170,11 @@ func main() {
 	filterRules, filterMap := loadFilterFile(filterFile)
 
 	// Set the global root path for filter path calculations
-	absRootPath, _ := filepath.Abs(rootPath)
+	absRootPath, err := filepath.Abs(rootPath)
+	if err != nil {
+		fmt.Printf("Error getting absolute path: %v\n", err)
+		os.Exit(1)
+	}
 	globalRootPath = absRootPath
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -191,7 +195,11 @@ func main() {
 	}
 
 	// Initialize root node immediately for UI
-	absPath, _ := filepath.Abs(rootPath)
+	absPath, err := filepath.Abs(rootPath)
+	if err != nil {
+		fmt.Printf("Error getting absolute path: %v\n", err)
+		os.Exit(1)
+	}
 	m.root = &FileNode{
 		Name:     filepath.Base(absPath),
 		Path:     absPath,
@@ -1065,11 +1073,21 @@ func getFilterPath(path string) string {
 	// Use global root path if set, otherwise fall back to current working directory
 	rootPath := globalRootPath
 	if rootPath == "" {
-		wd, _ := os.Getwd()
-		rootPath = wd
+		wd, err := os.Getwd()
+		if err != nil {
+			// Fallback to current directory if we can't get working directory
+			rootPath = "."
+		} else {
+			rootPath = wd
+		}
 	} else {
 		// Ensure rootPath is also absolute for proper comparison
-		rootPath, _ = filepath.Abs(rootPath)
+		var err error
+		rootPath, err = filepath.Abs(rootPath)
+		if err != nil {
+			// If we can't get absolute path, use as-is
+			rootPath = globalRootPath
+		}
 	}
 
 	rel, err := filepath.Rel(rootPath, absPath)
@@ -1237,7 +1255,12 @@ func loadFilterFile(filename string) ([]FilterRule, map[string]FilterState) {
 	if err != nil {
 		return filterRules, filterMap
 	}
-	defer file.Close()
+	defer func() {
+		if closeErr := file.Close(); closeErr != nil {
+			// Log error but don't override main error
+			fmt.Printf("Warning: failed to close file: %v\n", closeErr)
+		}
+	}()
 
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
@@ -1257,6 +1280,10 @@ func loadFilterFile(filename string) ([]FilterRule, map[string]FilterState) {
 		}
 	}
 
+	if err := scanner.Err(); err != nil {
+		fmt.Printf("Warning: error reading filter file: %v\n", err)
+	}
+
 	return filterRules, filterMap
 }
 
@@ -1265,7 +1292,12 @@ func saveFilterFile(filename string, filterRules []FilterRule, filterMap map[str
 	if err != nil {
 		return err
 	}
-	defer file.Close()
+	defer func() {
+		if closeErr := file.Close(); closeErr != nil {
+			// Log error but don't override main error
+			fmt.Printf("Warning: failed to close file: %v\n", closeErr)
+		}
+	}()
 
 	writer := bufio.NewWriter(file)
 	writtenPaths := make(map[string]bool)
@@ -1331,7 +1363,10 @@ func saveFilterFile(filename string, filterRules []FilterRule, filterMap map[str
 		}
 	}
 
-	return writer.Flush()
+	if err := writer.Flush(); err != nil {
+		return fmt.Errorf("failed to flush writer: %w", err)
+	}
+	return nil
 }
 
 // shouldInsertBefore determines if a new rule should be inserted before an existing rule
