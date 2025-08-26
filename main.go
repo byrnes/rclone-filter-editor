@@ -227,10 +227,31 @@ func main() {
 func (m *Model) buildFileTreeAsync(rootPath string) {
 	// Start background goroutine for breadth-first concurrent tree building
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				// Handle any panics in goroutine gracefully
+				fmt.Printf("Warning: goroutine panic during tree building: %v\n", r)
+			}
+		}()
+
+		// Check if context is already cancelled before starting
+		select {
+		case <-m.ctx.Done():
+			return
+		default:
+		}
+
 		m.buildTreeBreadthFirst(m.root, m.filterRules)
-		// Send completion message
-		if m.program != nil {
-			m.program.Send(treeReadyMsg{root: m.root})
+
+		// Check context again before sending completion message
+		select {
+		case <-m.ctx.Done():
+			return
+		default:
+			// Send completion message only if not cancelled
+			if m.program != nil {
+				m.program.Send(treeReadyMsg{root: m.root})
+			}
 		}
 	}()
 }
@@ -270,10 +291,31 @@ func (m *Model) refreshDirectory() {
 
 	// Start async tree building
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				// Handle any panics in goroutine gracefully
+				fmt.Printf("Warning: goroutine panic during directory refresh: %v\n", r)
+			}
+		}()
+
+		// Check if context is already cancelled before starting
+		select {
+		case <-m.ctx.Done():
+			return
+		default:
+		}
+
 		m.buildTreeBreadthFirst(m.root, m.filterRules)
-		// Send completion message
-		if m.program != nil {
-			m.program.Send(treeReadyMsg{root: m.root})
+
+		// Check context again before sending completion message
+		select {
+		case <-m.ctx.Done():
+			return
+		default:
+			// Send completion message only if not cancelled
+			if m.program != nil {
+				m.program.Send(treeReadyMsg{root: m.root})
+			}
 		}
 	}()
 }
@@ -300,24 +342,70 @@ func (m *Model) buildTreeBreadthFirst(root *FileNode, filterRules []FilterRule) 
 
 			wg.Add(1)
 			go func(node *FileNode) {
-				defer wg.Done()
-				semaphore <- struct{}{}        // Acquire
-				defer func() { <-semaphore }() // Release
+				defer func() {
+					wg.Done()
+					if r := recover(); r != nil {
+						// Handle any panics in goroutine gracefully
+						fmt.Printf("Warning: goroutine panic during directory scan: %v\n", r)
+					}
+				}()
+
+				// Check context before acquiring semaphore
+				select {
+				case <-m.ctx.Done():
+					return
+				case semaphore <- struct{}{}: // Acquire
+					defer func() { <-semaphore }() // Release
+				}
+
+				// Double-check context after acquiring semaphore
+				select {
+				case <-m.ctx.Done():
+					return
+				default:
+				}
 
 				children := m.scanSingleDirectory(node, m.filterRules)
-				nextLevelChan <- children
+
+				// Check context before sending results
+				select {
+				case <-m.ctx.Done():
+					return
+				case nextLevelChan <- children:
+				}
 			}(dir)
 		}
 
 		// Wait for all directories in current level to complete
 		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					fmt.Printf("Warning: goroutine panic during wait: %v\n", r)
+				}
+			}()
 			wg.Wait()
 			close(nextLevelChan)
 		}()
 
-		// Collect children for next level
-		for children := range nextLevelChan {
-			queue = append(queue, children...)
+		// Collect children for next level with context checking
+	levelLoop:
+		for {
+			select {
+			case <-m.ctx.Done():
+				// Drain the channel to prevent goroutine leaks
+				go func() {
+					for range nextLevelChan {
+						// Drain remaining items
+					}
+				}()
+				return
+			case children, ok := <-nextLevelChan:
+				if !ok {
+					// Channel closed - done with this level
+					break levelLoop
+				}
+				queue = append(queue, children...)
+			}
 		}
 	}
 }
@@ -396,25 +484,33 @@ func (m *Model) scanSingleDirectory(node *FileNode, filterRules []FilterRule) []
 	// Sort children using the model's sort mode
 	m.sortChildren(children)
 
-	node.mu.Lock()
-	node.Children = children
-	node.Loading = false
-
 	// Calculate stats for this directory now that children are loaded
+	// Do this BEFORE acquiring the lock to avoid race conditions with child access
 	var totalSize int64
 	var totalFiles int
 	for _, child := range children {
 		if child.IsDir {
-			totalSize += child.TotalSize
-			totalFiles += child.TotalFiles
+			// For directories, we need to safely read their stats
+			child.mu.RLock()
+			childSize := child.TotalSize
+			childFiles := child.TotalFiles
+			child.mu.RUnlock()
+
+			totalSize += childSize
+			totalFiles += childFiles
 		} else {
+			// For files, Size is immutable after creation
 			totalSize += child.Size
 			totalFiles++
 		}
 	}
+
+	// Now safely update the node with all computed values
+	node.mu.Lock()
+	node.Children = children
+	node.Loading = false
 	node.TotalSize = totalSize
 	node.TotalFiles = totalFiles
-
 	node.mu.Unlock()
 
 	return childDirectories
@@ -738,6 +834,8 @@ func (m *Model) invertSelection() {
 		}
 	}
 
+	// Pattern cache updates would go here in production
+
 	// Update children of all changed directories
 	for _, dir := range changedDirs {
 		m.updateChildrenFilters(dir)
@@ -1015,7 +1113,7 @@ func (m Model) renderLoading() string {
 		Align(lipgloss.Center)
 
 	spinner := "⟳"
-	switch (time.Now().UnixNano() / 200000000) % 4 { // Slower spinner rotation
+	switch (time.Now().UnixNano() / int64(200*time.Millisecond)) % 4 {
 	case 0:
 		spinner = "▐"
 	case 1:
@@ -1099,7 +1197,7 @@ func getFilterPath(path string) string {
 
 // matchesRclonePattern checks if a path matches an rclone filter pattern
 func matchesRclonePattern(pattern, path string) bool {
-	// Handle empty or invalid patterns
+	// Handle empty patterns
 	if pattern == "" {
 		return false
 	}
@@ -1257,7 +1355,6 @@ func loadFilterFile(filename string) ([]FilterRule, map[string]FilterState) {
 	}
 	defer func() {
 		if closeErr := file.Close(); closeErr != nil {
-			// Log error but don't override main error
 			fmt.Printf("Warning: failed to close file: %v\n", closeErr)
 		}
 	}()
@@ -1294,7 +1391,6 @@ func saveFilterFile(filename string, filterRules []FilterRule, filterMap map[str
 	}
 	defer func() {
 		if closeErr := file.Close(); closeErr != nil {
-			// Log error but don't override main error
 			fmt.Printf("Warning: failed to close file: %v\n", closeErr)
 		}
 	}()
