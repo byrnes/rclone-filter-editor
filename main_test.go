@@ -4,9 +4,26 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
+
+// newTestModel creates a properly initialized Model for testing
+func newTestModel() *Model {
+	return &Model{
+		filterMap:   make(map[string]FilterState),
+		filterMapMu: &sync.RWMutex{},
+	}
+}
+
+// newTestModelWithFilterMap creates a Model with a pre-populated filter map
+func newTestModelWithFilterMap(filterMap map[string]FilterState) *Model {
+	return &Model{
+		filterMap:   filterMap,
+		filterMapMu: &sync.RWMutex{},
+	}
+}
 
 func TestFilterStateOperations(t *testing.T) {
 	tests := []struct {
@@ -177,9 +194,7 @@ func TestGetNodeDepth(t *testing.T) {
 }
 
 func TestInvertSelection(t *testing.T) {
-	model := &Model{
-		filterMap: make(map[string]FilterState),
-	}
+	model := newTestModel()
 
 	nodes := []*FileNode{
 		{Path: "/file1", Filter: FilterInclude},
@@ -212,12 +227,10 @@ func TestInvertSelection(t *testing.T) {
 }
 
 func TestResetFilters(t *testing.T) {
-	model := &Model{
-		filterMap: map[string]FilterState{
-			"/file1": FilterInclude,
-			"/file2": FilterExclude,
-		},
-	}
+	model := newTestModelWithFilterMap(map[string]FilterState{
+		"/file1": FilterInclude,
+		"/file2": FilterExclude,
+	})
 
 	nodes := []*FileNode{
 		{Path: "/file1", Filter: FilterInclude},
@@ -601,9 +614,7 @@ func TestFilterRuleOrdering(t *testing.T) {
 
 func TestDirectoryExclusionPattern(t *testing.T) {
 	// Create a model with some test nodes
-	model := &Model{
-		filterMap: make(map[string]FilterState),
-	}
+	model := newTestModel()
 
 	// Set up global root path for getFilterPath
 	originalGlobalRootPath := globalRootPath
@@ -678,9 +689,7 @@ func TestSpaceKeyDirectoryExclusion(t *testing.T) {
 	globalRootPath = "/test"
 	defer func() { globalRootPath = originalGlobalRootPath }()
 
-	model := &Model{
-		filterMap: make(map[string]FilterState),
-	}
+	model := newTestModel()
 
 	// Create test directory node
 	dirNode := &FileNode{
@@ -774,9 +783,7 @@ func TestInvertSelectionDirectoryPattern(t *testing.T) {
 	globalRootPath = "/test"
 	defer func() { globalRootPath = originalGlobalRootPath }()
 
-	model := &Model{
-		filterMap: make(map[string]FilterState),
-	}
+	model := newTestModel()
 
 	// Create mixed nodes
 	dirNode := &FileNode{
@@ -887,9 +894,8 @@ func TestSaveFilterFileWithDirectoryPatterns(t *testing.T) {
 
 func TestSortByLastModified(t *testing.T) {
 	// Create a model with test nodes having different modification times
-	model := &Model{
-		sortMode: SortByLastModified,
-	}
+	model := newTestModel()
+	model.sortMode = SortByLastModified
 
 	now := time.Now()
 
@@ -967,7 +973,7 @@ func TestSortByLastModified(t *testing.T) {
 }
 
 func TestHelpTextCompleteness(t *testing.T) {
-	model := &Model{}
+	model := newTestModel()
 	helpText := model.renderHelp()
 
 	// Check that all sort modes are documented
@@ -1142,10 +1148,8 @@ func TestApplicationFilterBehaviorWithRealFiles(t *testing.T) {
 	}
 
 	// Create model like the real application does
-	model := &Model{
-		filterRules: filterRules,
-		filterMap:   filterMap,
-	}
+	model := newTestModelWithFilterMap(filterMap)
+	model.filterRules = filterRules
 
 	// Debug the loaded filterMap
 	t.Logf("Loaded filterMap has %d entries:", len(filterMap))
@@ -1293,10 +1297,8 @@ func TestModelGetEffectiveFilterWithMap(t *testing.T) {
 	}
 
 	// Create model like the real application does
-	model := &Model{
-		filterRules: filterRules,
-		filterMap:   make(map[string]FilterState), // Empty filterMap like at startup
-	}
+	model := newTestModel()
+	model.filterRules = filterRules
 
 	// Set up global root path for test/folder_a
 	originalGlobalRootPath := globalRootPath
@@ -1346,10 +1348,8 @@ func TestModelGetEffectiveFilterWithMap(t *testing.T) {
 
 func TestChildrenFilterUpdateOnFolderChangeSimple(t *testing.T) {
 	// Create a simple test case to verify children filter updates
-	model := &Model{
-		filterMap:   make(map[string]FilterState),
-		filterRules: []FilterRule{},
-	}
+	model := newTestModel()
+	model.filterRules = []FilterRule{}
 
 	// Set up global root path
 	originalGlobalRootPath := globalRootPath
@@ -1416,10 +1416,8 @@ func TestChildrenFilterUpdateOnFolderChangeSimple(t *testing.T) {
 
 func TestChildrenFilterUpdateOnFolderChange(t *testing.T) {
 	// Create a model with a directory tree structure
-	model := &Model{
-		filterMap:   make(map[string]FilterState),
-		filterRules: []FilterRule{},
-	}
+	model := newTestModel()
+	model.filterRules = []FilterRule{}
 
 	// Set up global root path
 	originalGlobalRootPath := globalRootPath

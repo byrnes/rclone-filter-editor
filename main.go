@@ -77,6 +77,7 @@ type Model struct {
 	visibleNodes    []*FileNode
 	filterRules     []FilterRule
 	filterMap       map[string]FilterState
+	filterMapMu     *sync.RWMutex // Protects filterMap from concurrent access
 	filterFile      string
 	showHelp        bool
 	showSaveConfirm bool
@@ -186,6 +187,7 @@ func main() {
 	m := Model{
 		filterRules:  filterRules,
 		filterMap:    filterMap,
+		filterMapMu:  &sync.RWMutex{},
 		filterFile:   filterFile,
 		loading:      true,
 		loadProgress: "Scanning directories...",
@@ -392,10 +394,21 @@ func (m *Model) buildTreeBreadthFirst(root *FileNode, filterRules []FilterRule) 
 		for {
 			select {
 			case <-m.ctx.Done():
-				// Drain the channel to prevent goroutine leaks
+				// Drain the channel to prevent goroutine leaks with timeout
 				go func() {
-					for range nextLevelChan {
-						// Drain remaining items
+					timeout := time.NewTimer(5 * time.Second)
+					defer timeout.Stop()
+					for {
+						select {
+						case <-nextLevelChan:
+							// Drain remaining items
+						case <-timeout.C:
+							// Timeout - exit to prevent leak
+							return
+						case <-m.ctx.Done():
+							// Context cancelled - exit
+							return
+						}
 					}
 				}()
 				return
@@ -441,6 +454,11 @@ func (m *Model) scanSingleDirectory(node *FileNode, filterRules []FilterRule) []
 
 	for _, entry := range entries {
 		childPath := filepath.Join(node.Path, entry.Name())
+
+		// Validate path to prevent traversal attacks
+		if err := validatePath(childPath, globalRootPath); err != nil {
+			continue // Skip potentially malicious paths
+		}
 
 		// Get file info to capture size and modification time
 		var modTime time.Time
@@ -686,7 +704,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 
 		case "left":
-			if m.cursor < len(m.visibleNodes) {
+			if m.cursor >= 0 && m.cursor < len(m.visibleNodes) {
 				node := m.visibleNodes[m.cursor]
 				if node.IsDir && node.Expanded {
 					node.Expanded = false
@@ -706,7 +724,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 
 		case "right", "enter":
-			if m.cursor < len(m.visibleNodes) {
+			if m.cursor >= 0 && m.cursor < len(m.visibleNodes) {
 				node := m.visibleNodes[m.cursor]
 				if node.IsDir && !node.Expanded {
 					node.Expanded = true
@@ -716,7 +734,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 
 		case " ":
-			if m.cursor < len(m.visibleNodes) {
+			if m.cursor >= 0 && m.cursor < len(m.visibleNodes) {
 				node := m.visibleNodes[m.cursor]
 				node.Filter = (node.Filter + 1) % 3
 
@@ -730,10 +748,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// Normalize pattern to match original filter file format (without leading slash)
 				filterPath = strings.TrimPrefix(filterPath, "/")
 
+				m.filterMapMu.Lock()
 				m.filterMap[filterPath] = node.Filter
 				if node.Filter == FilterNone {
 					delete(m.filterMap, filterPath)
 				}
+				m.filterMapMu.Unlock()
 
 				// Update children's filter status if this is a directory
 				if node.IsDir {
@@ -827,11 +847,13 @@ func (m *Model) invertSelection() {
 			changedDirs = append(changedDirs, node)
 		}
 
+		m.filterMapMu.Lock()
 		if node.Filter == FilterNone {
 			delete(m.filterMap, filterPath)
 		} else {
 			m.filterMap[filterPath] = node.Filter
 		}
+		m.filterMapMu.Unlock()
 	}
 
 	// Pattern cache updates would go here in production
@@ -916,6 +938,7 @@ func (m *Model) getEffectiveFilterWithMap(path string) FilterState {
 	var foundMatch bool
 
 	// First, check all patterns in filterMap (including new user patterns)
+	m.filterMapMu.RLock()
 	for pattern, state := range m.filterMap {
 		if pattern == path || matchesRclonePattern(pattern, path) {
 			// If this is a more specific match, use it
@@ -926,6 +949,7 @@ func (m *Model) getEffectiveFilterWithMap(path string) FilterState {
 			}
 		}
 	}
+	m.filterMapMu.RUnlock()
 
 	// If we found a match in filterMap, return it
 	if foundMatch {
@@ -936,7 +960,10 @@ func (m *Model) getEffectiveFilterWithMap(path string) FilterState {
 	for _, rule := range m.filterRules {
 		if rule.Pattern == path || matchesRclonePattern(rule.Pattern, path) {
 			// Only use this if it's not already handled by filterMap
-			if _, exists := m.filterMap[rule.Pattern]; !exists {
+			m.filterMapMu.RLock()
+			_, exists := m.filterMap[rule.Pattern]
+			m.filterMapMu.RUnlock()
+			if !exists {
 				return rule.State
 			}
 		}
@@ -1162,6 +1189,50 @@ func formatSize(size int64) string {
 	return fmt.Sprintf("%.1f %cB", float64(size)/float64(div), "KMGTPE"[exp])
 }
 
+// validatePath checks if a path is safe and within allowed boundaries
+func validatePath(path, rootPath string) error {
+	// Clean the paths
+	cleanPath := filepath.Clean(path)
+	cleanRoot := filepath.Clean(rootPath)
+	
+	// Convert to absolute paths for comparison
+	absPath, err := filepath.Abs(cleanPath)
+	if err != nil {
+		return fmt.Errorf("invalid path: %v", err)
+	}
+	
+	absRoot, err := filepath.Abs(cleanRoot)
+	if err != nil {
+		return fmt.Errorf("invalid root path: %v", err)
+	}
+	
+	// Check if path is within root directory
+	if !strings.HasPrefix(absPath, absRoot) {
+		return fmt.Errorf("path outside allowed directory")
+	}
+	
+	return nil
+}
+
+// validateFilterFilePath checks if a filter file path is safe
+func validateFilterFilePath(filename string) error {
+	// Clean the path
+	cleanPath := filepath.Clean(filename)
+	
+	// Check for suspicious patterns
+	if strings.Contains(cleanPath, "..") {
+		return fmt.Errorf("path traversal detected in filter file path")
+	}
+	
+	// Check for common system files
+	basename := filepath.Base(cleanPath)
+	if basename == "passwd" || basename == "shadow" || strings.HasSuffix(basename, ".exe") {
+		return fmt.Errorf("access to system file denied")
+	}
+	
+	return nil
+}
+
 var globalRootPath string
 
 func getFilterPath(path string) string {
@@ -1349,6 +1420,12 @@ func loadFilterFile(filename string) ([]FilterRule, map[string]FilterState) {
 	var filterRules []FilterRule
 	filterMap := make(map[string]FilterState)
 
+	// Validate filter file path
+	if err := validateFilterFilePath(filename); err != nil {
+		fmt.Printf("Security warning: %v\n", err)
+		return filterRules, filterMap
+	}
+
 	file, err := os.Open(filename)
 	if err != nil {
 		return filterRules, filterMap
@@ -1385,6 +1462,11 @@ func loadFilterFile(filename string) ([]FilterRule, map[string]FilterState) {
 }
 
 func saveFilterFile(filename string, filterRules []FilterRule, filterMap map[string]FilterState) error {
+	// Validate filter file path
+	if err := validateFilterFilePath(filename); err != nil {
+		return fmt.Errorf("security error: %v", err)
+	}
+
 	file, err := os.Create(filename)
 	if err != nil {
 		return err
