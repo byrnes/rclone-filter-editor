@@ -51,5 +51,8 @@ Thumbs.db
 *.tmp
 *.temp
 
+# Windows null device file
+nul
+
 # Claude Code settings
 .claude/
